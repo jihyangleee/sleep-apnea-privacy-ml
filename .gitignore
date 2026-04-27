@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pth
+*.egg-info/
+.DS_Store
+
+# 학습된 모델 (재현 가능, 용량 큼)
+*.pt
+
+# SHHS 데이터셋 (연구 승인 데이터 — 절대 커밋 금지)
+*.csv
+*.sas7bdat
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
