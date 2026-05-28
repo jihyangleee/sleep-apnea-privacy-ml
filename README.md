@@ -1,195 +1,225 @@
-# Sleep Apnea Federated Learning with Homomorphic Encryption
+# Sleep Apnea VFL + HE
 
-수면 무호흡증 예측을 위한 **Vertical Federated Learning** + **동형암호화(HE) 추론** 시스템.
+수면 무호흡증 예측을 위한 **Vertical Federated Learning + 동형암호화(CKKS) 추론** 시스템.
 
-여러 의료 기관이 원시 데이터를 공유하지 않고 협력하여 모델을 학습하고,
-학습에 참여하지 않은 신규 개인도 자신의 데이터를 암호화한 채로 예측 결과를 받을 수 있다.
+3개 병원이 원시 데이터를 공유하지 않고 협력 학습하고,
+환자 기기(Galaxy Watch)는 기능을 암호화한 채로 예측 결과를 받는다.
 
 ---
 
-## 전체 구조
+## 학습 — Vertical FL + Additive SS + DP Noise
 
 ```
-[학습 단계 — Vertical Federated Learning]
+병원 A (SpO₂, avg HR)       병원 B (수면지표 3개)        병원 C (나이, 성별, BMI)
+      │ sub_model_A                 │ sub_model_B                 │ sub_model_C
+      │ Linear → PolyAct            │ Linear → PolyAct            │ Linear → PolyAct
+      ↓ emb_A                       ↓ emb_B                       ↓ emb_C
+      │
+      ├─── additive split + DP noise ──────────────────────────────────┐
+      │                                                                 │
+      │  병원 j 수신: concat_share_j = [share_A_j, share_B_j, share_C_j]  │
+      │  h_share_j = concat_share_j @ W_top1 + b1/n   ← SS 선형 분산  │
+      │                                                                 │
+      │  [랜덤 coordinator 선정]                                        │
+      │  h_linear = Σ h_share_j     ← 평문으로 봄 (semi-honest)       │
+      │  h_act    = PolyAct(h_linear)   ← 병원 간 피처 상호작용       │
+      │  logit    = h_act @ W_top2                                      │
+      │  loss     = BCEWithLogitsLoss(logit, y)                        │
+      └─────────────────────────────────────────────────────────────────┘
 
-  client A (심박·산소 모니터링)   client B (수면검사실 PSG)   client C (병원/클리닉)
-  SpO2, resting HR, avg HR       total sleep, efficiency,    age, sex, BMI
-                                  deep sleep ratio            + 레이블(수면무호흡 여부)
-         ↓ sub_model_A                  ↓ sub_model_B               ↓ sub_model_C
-      embedding_A (16d)            embedding_B (16d)           embedding_C (16d)
-                    └──────────────────┴────────────────────────────┘
-                                       ↓ concat (48d)
-                                  [서버 top_model]
-                              Linear(48→32) → Square → Linear(32→1)
-                                       ↓ BCEWithLogitsLoss → 역전파
+  [Backward]
+  coordinator → d_loss/d_h_linear = d_loss/d_h_act * PolyAct'(h_linear)
+             → 각 병원에 d_loss/d_h_linear 전송
+  병원 j     → d_loss/d_W_top1  += concat_share_j.T @ d_loss/d_h_linear
+             → d_loss/d_concat_share_j = d_loss/d_h_linear @ W_top1.T
+  병원 i     → d_loss/d_emb_i = Σⱼ d_loss/d_concat_share_j[:, 해당 슬라이스]
+             → d_loss/d_W_sub_i = x_i.T @ d_loss/d_emb_i * PolyAct'(linear(x_i))
+             → sub_model_i 업데이트
+  (시뮬레이션에서는 PyTorch autograd가 위 흐름을 자동 계산)
 
-
-[추론 단계 — HE Inference]
-
-  신규 개인(환자)                              서버
-  feature 9개 전체                             평문 가중치 보유
-       ↓ CKKS 암호화                           공개키만 사용
-  암호화된 벡터 ──────────────────────────→  HE 연산 (ciphertext × plaintext)
-                                               ↓ 암호화된 로짓
-  예측 확률 ←─────── 복호화 (비밀키) ────────  암호화된 결과 반환
+프라이버시 메커니즘
+  - Additive SS   : 개별 share는 정보이론적으로 랜덤 → 원본 embedding 복원 불가
+  - DP noise      : 전송 전 Gaussian noise 주입 → 통계적 추론 차단
+  - Rotating coord: 매 배치마다 coordinator 랜덤 선정 → semi-honest 신뢰 분산
 ```
+
+---
+
+## 추론 — CKKS 동형암호 + W_top Additive Share
+
+```
+                     [Galaxy Watch / 환자 기기]  (CKKS 비밀키 보유)
+                                    │
+         ┌──────────────────────────┼──────────────────────────┐
+         │ enc([f0,f1])             │ enc([f2,f3,f4])          │ enc([f5,f6,f7])
+         ↓                          ↓                           ↓
+     병원 A                      병원 B                      병원 C
+  sub_model_A (CKKS)          sub_model_B (CKKS)          sub_model_C (CKKS)
+  Linear → PolyAct_CKKS       Linear → PolyAct_CKKS       Linear → PolyAct_CKKS
+         │ enc(emb_A)                │ enc(emb_B)                 │ enc(emb_C)
+         └──────────── enc(emb) 교환 (ciphertext, 복호화 불가) ───┘
+                                    │
+     각 병원 i:  enc(h_share_i) = Σⱼ enc(emb_j) @ W_top1_share_i[j]  + b1_share_i
+                                    │
+     [랜덤 coordinator]  enc(h_linear) = Σ enc(h_share_i)
+                                    │
+                    PolyAct_CKKS(enc(h_linear))   ← -1 HE 레벨
+                                    │
+     각 병원 i:  enc(logit_share_i) = enc(h_act) @ W_top2_share_i + b2_share_i
+                                    │
+     coordinator: enc(logit) = Σ enc(logit_share_i)
+                                    │
+                     [Galaxy Watch / 환자 기기]
+                     sigmoid(decrypt(enc(logit))) → 수면무호흡 확률
+
+프라이버시 메커니즘
+  - 환자 feature  : 병원별 slice만 암호화 전송, 다른 병원 feature 접근 불가
+  - enc(emb)      : ciphertext 교환, 어떤 병원도 복호화 불가
+  - W_top1, W_top2: 추론 시 additive share 분산 보유, 누구도 전체 가중치 미보유
+  - PolyAct       : 암호화 상태로 연산, coordinator도 h_linear 평문 미열람
+  - 최종 logit    : 환자 기기만 복호화 가능
+```
+
+---
+
+## 학습 vs 추론 구조 비교
+
+| | 학습 | 추론 |
+|---|---|---|
+| SS 대상 | **데이터** (embedding additive split) | **모델 가중치** (W_top additive split) |
+| 이유 | 평문 share는 선형 연산에서 분산 가능 | ciphertext는 분할 불가; 같은 enc에 weight share 적용 |
+| 비선형 (PolyAct) | coordinator가 h_linear 보고 적용 | CKKS 다항식 — ciphertext 상태 그대로 |
+| coordinator | 랜덤 선정, h_linear 평문 노출 | 랜덤 선정, ciphertext만 봄 |
+| 최종 sigmoid | BCEWithLogitsLoss 내부 적용 | 환자 기기에서 decrypt 후 적용 |
+
+---
+
+## 모델 구조
+
+### Sub-model (병원별 private)
+```
+Linear(|feature_i| → emb_dim) → PolyAct
+```
+각 병원의 feature만 처리. 다른 병원과 공유되지 않음.
+
+### Top-model (병원 간 공유, 동일 가중치)
+```
+Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
+```
+- Linear1: SS로 분산 계산 (각 병원이 자기 share에 적용, 합산)
+- PolyAct: 병원 간 cross-feature 비선형 상호작용 학습
+- Linear2: 추론 시 additive share로 분산
+
+### PolyAct: `f(x) = x * (x + 0.5) = x² + 0.5x`
+- CKKS 동형암호 호환 (다항식)
+- 인수분해 형태 → ciphertext 곱셈 1회 (-1 HE 레벨)
+- ReLU / sigmoid 대신 사용
+
+### CKKS 파라미터
+| 파라미터 | 값 |
+|---|---|
+| `poly_modulus_degree` | 16384 |
+| `coeff_mod_bit_sizes` | [60, 40, 40, 40, 40, 40, 60] |
+| `global_scale` | 2⁴⁰ |
+| 가용 곱셈 레벨 | 5 |
+| 소비 레벨 | 2 (sub-model + top-model PolyAct) |
+| 남은 레벨 | 3 |
 
 ---
 
 ## 데이터셋
 
-**Sleep Heart Health Study (SHHS-1)** — NSRR (National Sleep Research Resource)
+**Sleep Heart Health Study (SHHS-1)** — NSRR
 
-- 출처: [sleepdata.org/datasets/shhs](https://sleepdata.org/datasets/shhs)
-- 접근: 연구자 승인 신청 후 다운로드 (`shhs1-dataset-*.csv`)
-- 레이블: `ahi_a0h3a ≥ 15` → 중등도 이상 수면무호흡 (1), 정상 (0)
-
-| 피처 | SHHS 변수명 | 담당 기관 |
+| feature | SHHS 변수명 | 담당 병원 |
 |---|---|---|
-| SpO2 (평균 산소포화도) | `avgsat` | client A |
-| Resting heart rate | `avhr` | client A |
-| Avg heart rate | `avhrbk` | client A |
-| Total sleep time (분) | `slpprdp` | client B |
-| Sleep efficiency (%) | `slpeffic` | client B |
-| Deep sleep ratio (%) | `pctsa34p` | client B |
-| Age | `age_s1` | client C |
-| Sex | `gender` | client C |
-| BMI | `bmi_s1` | client C |
+| SpO₂ 평균 산소포화도 | `avgsao2` | 병원 A |
+| 평균 심박수 | `avg_hr` | 병원 A |
+| 총수면시간 (분) | `slptime` | 병원 B |
+| 수면 효율 (%) | `slp_eff` | 병원 B |
+| 깊은수면 비율 (%) | `timest34p` | 병원 B |
+| 나이 | `age_s1` | 병원 C |
+| 성별 | `gender` | 병원 C |
+| BMI | `bmi_s1` | 병원 C |
 
-더 많은 Feature가 존재하지만 Galaxy Watch와 연동하여 수면 무호흡증을 예측하기 위해 위의 Feature만 사용함
+레이블: `ahi_a0h3a >= 15` → 중등도 이상 수면무호흡
+
+대안 데이터: DREAMT v2.1.0 (`--dreamt`), 기본값: 합성 더미 데이터
 
 ---
 
-## 모델 아키텍처
+## 프라이버시 보장 범위
 
-### ClientSubModel (`model.py`)
-각 클라이언트가 담당 feature를 임베딩으로 변환하는 서브모델.
-
-```
-Linear(input_dim → 16) → Square(x²)
-```
-
-- 활성화 함수로 **ReLU/Sigmoid 대신 x²(Square)** 사용
-- 이유: CKKS 동형암호는 다항식 연산만 지원하므로, HE 추론과 호환되는 활성화 함수 필요
-
-### ServerTopModel (`model.py`)
-서버가 보유하는 탑모델. 연결된 임베딩으로 최종 예측.
-
-```
-Linear(48 → 32) → Square(x²) → Linear(32 → 1)
-```
-
-- Sigmoid 없음 (HE 호환, 학습 시 BCEWithLogitsLoss 사용)
-
-### VerticalHeartNet (`model.py`)
-서브모델 3개 + 탑모델을 통합한 전체 모델. 저장/로드 및 HE 추론에 사용.
-
----
-
-## HE 추론 설계 (`he_client.py`)
-
-### 암호화 스킴: CKKS (Cheon-Kim-Kim-Song)
-근사 실수 연산을 지원하는 동형암호 스킴. 신경망 추론에 적합.
-
-### CKKS 파라미터
-
-| 파라미터 | 값 | 의미 |
+| 항목 | 학습 | 추론 |
 |---|---|---|
-| `poly_modulus_degree` | 8192 | 보안 수준 및 슬롯 수 결정 |
-| `coeff_mod_bit_sizes` | [60, 40, 40, 60] | 3레벨(곱셈 횟수) 제공 |
-| `global_scale` | 2⁴⁰ | 실수 정밀도 |
+| 환자 raw feature | - | 병원별 encrypted slice만 전달 ✅ |
+| embedding 노출 | SS + DP noise로 보호 ✅ | ciphertext 교환 ✅ |
+| h_linear 노출 | coordinator 평문 열람 (semi-honest) ⚠️ | ciphertext, 누구도 복호화 불가 ✅ |
+| 모델 가중치 W_top | 병원들이 동일 보유 | additive share 분산 보유 ✅ |
+| 최종 logit | coordinator 평문 계산 ⚠️ | 환자만 복호화 ✅ |
 
-### 곱셈 깊이 분석
-HE는 암호문끼리의 곱셈(Square 활성화)마다 레벨을 1씩 소비한다.
-
-```
-서브모델 Square: 1레벨 소비
-탑모델  Square: 1레벨 소비
-─────────────────────────
-합계           : 2레벨 소비  ←  제공 3레벨로 충분
-```
-
-### 가중치 확장(zero-padding) 전략
-단일 암호문 벡터(9차원) 하나로 모든 서브모델의 선형 변환을 처리하기 위해,
-각 서브모델의 가중치를 전체 feature 크기(9 × 48)로 확장하고 담당하지 않는 위치는 0으로 채운다.
-
-```
-W_ext_A: (9, 48), 열 [0:16]만 유효
-W_ext_B: (9, 48), 열 [16:32]만 유효
-W_ext_C: (9, 48), 열 [32:48]만 유효
-
-enc_emb_A = (enc_x @ W_ext_A + b_ext_A)²   → 위치 [0:16]만 non-zero
-enc_emb_B = (enc_x @ W_ext_B + b_ext_B)²   → 위치 [16:32]만 non-zero
-enc_emb_C = (enc_x @ W_ext_C + b_ext_C)²   → 위치 [32:48]만 non-zero
-
-enc_concat = enc_emb_A + enc_emb_B + enc_emb_C  ← 구간 비중복이므로 합 = 연결
-```
-
----
-
-## 사용 라이브러리
-
-| 라이브러리 | 버전 권장 | 용도 |
-|---|---|---|
-| `torch` (PyTorch) | ≥ 2.0 | 모델 정의, 학습, 역전파 |
-| `tenseal` | ≥ 0.3 | CKKS 동형암호 (Microsoft SEAL 래퍼) |
-| `numpy` | ≥ 1.24 | 행렬 연산, HE 가중치 확장 |
-| `pandas` | ≥ 2.0 | SHHS CSV 로드 |
-| `scikit-learn` | ≥ 1.3 | StandardScaler, train_test_split |
+> ⚠️ 학습 단계 한계: coordinator가 `h_linear`와 `logit`을 평문으로 봄 (semi-honest 가정).
+> 완전한 학습 프라이버시를 위해서는 Beaver Triple MPC 또는 TEE 필요.
 
 ---
 
 ## 파일 구조
 
 ```
-.
-├── dataset.py      데이터 로드(SHHS) 및 Vertical FL용 column 분할
-├── model.py        ClientSubModel, ServerTopModel, VerticalHeartNet
-├── client.py       VerticalClient — 서브모델 학습 및 임베딩 계산
-├── server.py       VerticalFLServer — 탑모델 학습 및 정확도 평가
-├── simulate.py     Vertical FL 시뮬레이션 루프 (feature 그룹 정의 포함)
-├── he_client.py    HEInference — CKKS 암호화 입력으로 프라이빗 추론
-└── main.py         진입점 (--mode vertical / he-infer, --csv 경로)
+├── dataset.py         데이터 로드 (SHHS / DREAMT / 합성)
+├── model.py           HospitalModel (학습+추론 통합), ServerTopModel, PolyActivation
+├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider, DHMasker
+├── simulate.py        run_distributed_simulation (신규), run_vertical_simulation (레거시)
+├── he_client.py       build_he_context, HospitalHE, HEInference (benchmark 호환)
+├── client.py          VerticalClient (레거시 학습)
+├── server.py          VerticalFLServer (레거시 학습)
+├── benchmark.py       HE vs 평문 / SS overhead 벤치마크
+└── main.py            진입점 (--mode vertical / distributed / he-infer)
 ```
 
 ---
 
-## 실행 방법
-
-### 1. 의존성 설치
+## 실행
 
 ```bash
 pip install torch tenseal numpy pandas scikit-learn
 ```
 
-### 2. SHHS 데이터 준비
-
-[sleepdata.org](https://sleepdata.org/datasets/shhs) 에서 연구자 승인 후 `shhs1-dataset-*.csv` 다운로드.
-
-
-### 3. Vertical FL 학습
+### 학습
 
 ```bash
-python main.py --mode vertical --csv shhs1-dataset-0.21.0.csv
+# 분산 학습 (SS + DP noise + rotating coordinator)
+python main.py --mode distributed
+
+# SHHS 데이터
+python main.py --mode distributed --csv shhs1-dataset-0.21.0.csv
+
+# DREAMT 데이터
+python main.py --mode distributed --dreamt physionet.org/files/dreamt/2.1.0
+
+# DP noise 조절 (기본 0.01, 0이면 비활성화)
+python main.py --mode distributed --dp-sigma 0.005
+
+# 레거시 학습 (semi-honest server 단일 코디네이터)
+python main.py --mode vertical
 ```
 
-학습 완료 후 `vertical_model.pt` 저장됨.
-
-### 4. HE 추론 데모
+### HE 추론 데모
 
 ```bash
-python main.py --mode he-infer --csv shhs1-dataset-0.21.0.csv
+python main.py --mode he-infer
 ```
 
-평문 추론 결과와 HE 추론 결과를 비교 출력. 오차 < 0.01이면 ✓.
+```
+[HE Inference] checkpoint mode: distributed
 
----
+Profile 0: 젊은 남성 (정상)
+  Plaintext prob  : 0.2341
+  HE prob         : 0.2342  |err|=0.000134  (entry=Hospital B)
+```
 
-## 프라이버시 보장 범위
+### 벤치마크
 
-| | 보호 여부 |
-|---|---|
-| 각 기관의 원시 feature (학습 중) | △ 임베딩만 서버에 전달 (Split Learning 수준) |
-| 신규 개인의 입력 데이터 (추론 중) | ✅ 서버가 평문을 볼 수 없음 (CKKS HE) |
-| 추론 결과 | ✅ 암호화된 상태로 반환, 개인만 복호화 가능 |
-| 모델 가중치 | ❌ 서버가 평문으로 보유 |
+```bash
+python benchmark.py --n-infer 10 --n-plain 500 --n-batches 30
+```

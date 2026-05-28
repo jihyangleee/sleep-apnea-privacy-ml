@@ -1,0 +1,398 @@
+[Projects]
+project_name: "DREAMT: Dataset for Real-time sleep stage EstimAtion using Multisensor wearable Technology"
+description: A curated dataset collected from 100 patients using Empatica E4; high resolution physiological signals matched to sleep stage information and sleep apnea events extracted from Polysomnography
+license: PhysioNet Restricted Health Data License 1.5.0
+keywords: ["sleep disorder", "wearable", "time series classification", "biomedical"]
+
+[Folders]
+data_64Hz = folder containing all the data files sampled at 64Hz. The data files in this folder only contains Wearable E4 signals.
+
+data_100Hz = folder containing all the data files sampled at 100Hz. The data files in this folder contains both Wearable E4 signals and PSG signals.
+
+[Files]
+participant_info.csv = information of all the recruited participants
+    - columns:
+        column_name: "SID",
+        description: id number of each participant,
+        acronym: "",
+        notes: No acronym used.
+
+        column_name: "Age",
+        description: Age of the participant,
+        acronym: "",
+        notes: No acronym used.
+
+        column_name: "GEDNER",
+        description: Gender of the participant,
+        acronyms:
+            acronym: "M",
+            full_form: "Male",
+
+            acronym: "F"
+            full_form: "Female",
+        notes: 
+
+        column_name: "BMI",
+        description: Body Mass Index of the participant,
+        acronym: "BMI",
+        full_form: "Body Mass Index",
+	unit: kg/m2,
+        notes:
+
+        column_name: "OAHI",
+        description: Obstructive apnea-hypopnea index of the participant,
+        acronym: "OAHI",
+        full_form: "Obstructive apnea-hypopnea index",
+	unit: events/hour,
+        notes: 
+
+        column_name: "AHI",
+        description: Apnea-hypopnea index of the participant,
+        acronym: "AHI",
+        full_form: "Apnea-hypopnea index",
+	unit: events/hour,
+        notes: 
+
+        column_name: "Mean_SaO2",
+        description: Mean_SaO2 of the participant,
+        acronym: "",
+	unit: %,
+        notes: No acronym used.
+
+        column_name: "Arousal Index",
+        description: Arousal index of the participant,
+        acronym: "",
+        notes: No acronym used.
+
+        column_name: "MEDICAL_HISTORY",
+        description: Medical history of the participant,
+        acronyms:
+            acronym: "GERD",
+            full_form: "Gastroesophageal reflux disease",
+
+            acronym: "CAD"
+            full_form: "Coronary artery disease",
+        notes: Only the most commonly occurring comorbidities in the cohort is recorded
+
+        column_name: "Sleep_Disorders",
+        description: Sleep disorder noticed of the participant,
+        acronyms:
+            acronym: "OSA",
+            full_form: "Obstructive sleep apnea",
+
+            acronym: "H/O OSA"
+            full_form: "History of obstructive sleep apnea",
+
+            acronym: "RLS",
+            full_form: "Restless legs syndrome",
+
+            acronym: "EDS",
+            full_form: "Excessive daytime sleepiness",
+
+            acronym: "RBD",
+            full_form: "REM sleep behavior disorder",
+
+            acronym: "MCI",
+            full_form: "Mild cognitive impairment",
+        notes: Only the most commonly occurring disorders in the cohort is recorded
+
+
+data_64Hz/SID_whole_df.csv = data file of wearable device data and sleep event of a participant_info
+- columns:
+        column_name: "TIMESTAMP",
+        description: Timestamp of the recorded data,
+        acronym: "",
+	unit: s,
+        notes: No acronym used. Timestamp shifted and started with 0, with frequency of 64 Hz.
+
+        column_name: "BVP",
+        description: Blood Volume Pulse of the participant at each timestamp,
+        acronym: "BVP",
+        full_form: Blood Volume Pulse,
+	unit: arbitrary,
+        notes: Derived from photoplethysomography (PPG) sensor, sampled at 64 Hz
+
+        column_name: "IBI",
+        description: Inter-beat interval of the participant at each timestamp,
+        acronym: "IBI",
+        full_form: Inter-beat interval,
+	unit: ms,
+        notes: Derived from photoplethysomography (PPG) sensor, sampled at 64 Hz
+
+        column_name: "EDA",
+        description: Electrodermal activity of the participant at each timestamp,
+        acronym: "EDA",
+        full_form: Electrodermal activity,
+	unit: μS,
+        notes: Sampled at 4 Hz
+
+        column_name: "TEMP",
+        description: Skin temperature of the participant at each timestamp,
+        acronym: "TEMP",
+        full_form: Skin temperature,
+	unit: °C,
+        notes: Sampled at 4 Hz
+
+        column_name: "ACC_X",
+        description: Accelerometer data on the X axis of the participant at each timestamp,
+        acronym: "ACC_X",
+        full_form: Accelerometer data on the X axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "ACC_Y",
+        description: Accelerometer data on the Y axis of the participant at each timestamp,
+        acronym: "ACC_Y",
+        full_form: Accelerometer data on the Y axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "ACC_Z",
+        description: Accelerometer data on the Z axis of the participant at each timestamp,
+        acronym: "ACC_Z",
+        full_form: Accelerometer data on the Z axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "HR",
+        description: Heart rate of the participant at each timestamp,
+        acronym: "HR",
+        full_form: Heart rate,
+	unit: bpm,
+        notes: Sampled at 1 Hz
+
+        column_name: "Sleep_Stage",
+        description: Sleep stage of the participant at each timestamp,
+        acronyms:
+	    acronym: "P",
+            full_form: "Preparation",
+
+	    acronym: "W",
+            full_form: "Wake",
+
+	    acronym: "N1",
+            full_form: "non-rapid eye-movement (NREM) stage 1",
+
+	    acronym: "N2",
+            full_form: "non-rapid eye-movement (NREM) stage 2",
+
+	    acronym: "N3",
+            full_form: "non-rapid eye-movement (NREM) stage 3",
+
+	    acronym: "R",
+            full_form: "Rapid eye movement (REM)",
+
+	    acronym: "Missing",
+            full_form: "No sleep stage labeled",
+        notes: "Preparation" stage is the stage before PSG data collection start
+
+        column_name: "Obstructive_Apnea",
+        description: Reporting event of obstructive apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means obstructive apnea detected.
+
+        column_name: "Central_Apnea",
+        description: Reporting event of central apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means central apnea detected.
+
+        column_name: "Hypopnea",
+        description: Reporting event of hypopnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means hypopnea detected.
+
+        column_name: "Mixed_Apnea",
+        description: Reporting event of mixed apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means mixed apnea detected.
+
+data_100Hz/SID_PSG_df.csv = data file of PSG data, wearable device data and sleep event of a participant_info
+- columns:
+        column_name: "TIMESTAMP",
+        description: Timestamp of the recorded data,
+        acronym: "",
+	unit: s,
+        notes: No acronym used. Timestamp shifted and started with 0, with frequency of 64 Hz.
+
+	column_name: "C4-M1", 
+	description: Channels recording brain activity from different scalp locations, providing insights into sleep stages and cortical activity, 
+	unit: μV,
+	channels: EEG
+
+	column_name: "F4-M1", 
+	description: Channels recording brain activity from different scalp locations, providing insights into sleep stages and cortical activity,
+	unit: μV,
+	channels: EEG
+
+	column_name: "O2-M1", 
+	description: Channels recording brain activity from different scalp locations, providing insights into sleep stages and cortical activity,
+	unit: μV,
+	channels: EEG
+
+	column_name: "T3-CZ", 
+	description: Channels recording brain activity from different scalp locations, providing insights into sleep stages and cortical activity,
+	unit: μV,
+	channels: EEG
+
+	column_name: "CZ-T4", 
+	description: Channels recording brain activity from different scalp locations, providing insights into sleep stages and cortical activity,
+	unit: μV,
+	channels: EEG
+
+	column_name: "E1", 
+	description: Channel monitoring eye movements, essential for identifying rapid eye movement (REM) sleep, 
+	unit: μV,
+	channels: EOG
+
+	column_name: "E2", 
+	description: Channel monitoring eye movements, essential for identifying rapid eye movement (REM) sleep, 
+	unit: μV,
+	channels: EOG
+
+	column_name: "CHIN", 
+	description: Monitoring chin muscle activity to detect muscle tone changes during sleep, 
+	unit: μV,
+	channels: EMG
+
+	column_name: "ECG", 
+	description: "Recording the heart's electrical activity essential for detecting heart rate and rhythm variations, 
+	unit: μV,
+	channels: ECG
+
+	column_name: "PTAF", 
+	description: "Airflow monitored by pressure transducer, 
+	unit: μV,
+	channels: Respiratory
+
+	column_name: "FLOW", 
+	description: "Airflow monitored by temperature changes, 
+	unit: μV,
+	channels: Respiratory
+
+	column_name: "THORAX", 
+	description: Channel monitoring respiratory effort through chest movements, 
+	unit: μV,
+	channels: Respiratory
+
+	column_name: "ABDOMEN", 
+	description: Channel monitoring respiratory effort through abdominal movements, 
+	unit: μV,
+	channels: Respiratory
+
+	column_name: "SNORE", 
+	description: Channel monitoring snoring sounds, 
+	unit: μV,
+	channels: Snoring
+
+	column_name: "LAT", 
+	description: Monitoring left anterior tibialis muscle activity for detecting periodic leg movements, 
+	unit: μV,
+	channels: Leg Movement
+
+	column_name: "RAT", 
+	description: Monitoring right anterior tibialis muscle activity for detecting periodic leg movements, 
+	unit: μV,
+	channels: Leg Movement
+
+	column_name: "SAO2", 
+	description: Monitoring the percentage of oxygen in the blood, 
+	unit: %,
+	channels: Blood Oxygen Saturation        
+
+	column_name: "BVP",
+        description: Blood Volume Pulse of the participant at each timestamp,
+        acronym: "BVP",
+        full_form: Blood Volume Pulse,
+	unit: arbitrary,
+        notes: Derived from photoplethysomography (PPG) sensor, sampled at 64 Hz
+
+        column_name: "IBI",
+        description: Inter-beat interval of the participant at each timestamp,
+        acronym: "IBI",
+        full_form: Inter-beat interval,
+	unit: ms,
+        notes: Derived from photoplethysomography (PPG) sensor, sampled at 64 Hz
+
+        column_name: "EDA",
+        description: Electrodermal activity of the participant at each timestamp,
+        acronym: "EDA",
+        full_form: Electrodermal activity,
+	unit: μS,
+        notes: Sampled at 4 Hz
+
+        column_name: "TEMP",
+        description: Skin temperature of the participant at each timestamp,
+        acronym: "TEMP",
+        full_form: Skin temperature,
+	unit: °C,
+        notes: Sampled at 4 Hz
+
+        column_name: "ACC_X",
+        description: Accelerometer data on the X axis of the participant at each timestamp,
+        acronym: "ACC_X",
+        full_form: Accelerometer data on the X axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "ACC_Y",
+        description: Accelerometer data on the Y axis of the participant at each timestamp,
+        acronym: "ACC_Y",
+        full_form: Accelerometer data on the Y axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "ACC_Z",
+        description: Accelerometer data on the Z axis of the participant at each timestamp,
+        acronym: "ACC_Z",
+        full_form: Accelerometer data on the Z axis,
+	unit: 1/64g,
+        notes: Sampled at 32 Hz
+
+        column_name: "HR",
+        description: Heart rate of the participant at each timestamp,
+        acronym: "HR",
+        full_form: Heart rate,
+	unit: bpm,
+        notes: Sampled at 1 Hz
+
+        column_name: "Sleep_Stage",
+        description: Sleep stage of the participant at each timestamp,
+        acronyms:
+	    acronym: "W",
+            full_form: "Wake",
+
+	    acronym: "N1",
+            full_form: "non-rapid eye-movement (NREM) stage 1",
+
+	    acronym: "N2",
+            full_form: "non-rapid eye-movement (NREM) stage 2",
+
+	    acronym: "N3",
+            full_form: "non-rapid eye-movement (NREM) stage 3",
+
+	    acronym: "R",
+            full_form: "Rapid eye movement (REM)",
+
+	    acronym: "Missing",
+            full_form: "No sleep stage labeled",
+        notes: "Preparation" stage is the stage before PSG data collection start
+
+        column_name: "Obstructive_Apnea",
+        description: Reporting event of obstructive apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means obstructive apnea detected.
+
+        column_name: "Central_Apnea",
+        description: Reporting event of central apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means central apnea detected.
+
+        column_name: "Hypopnea",
+        description: Reporting event of hypopnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means hypopnea detected.
+
+        column_name: "Mixed_Apnea",
+        description: Reporting event of mixed apnea at timestamp,
+        acronym: "",
+        notes: No acronym used, 1 means mixed apnea detected.

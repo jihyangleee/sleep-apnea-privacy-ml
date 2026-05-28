@@ -1,0 +1,117 @@
+## Known Issues
+
+These are known issues in the current version.
+
+- Impossible low and high outliers: **[oximet51](https://sleepdata.org/datasets/shhs/variables/oximet51) values below 80 or above 100**
+- One occurrence found: **[fev1](https://sleepdata.org/datasets/shhs/variables/fev1) value > 150 liters per second**
+- Multiple occurrences found: **Low values in [avg23bpd_s2](https://sleepdata.org/datasets/shhs/variables/avg23bpd_s2)**
+  - Several average diastolic readings below 40 millimeters of mercury
+-One occurrence found: **High value in [hip](https://sleepdata.org/datasets/shhs/variables/hip) > 1012.9 cm**
+- Multiple occurrences found: **Low values in [dias120](https://sleepdata.org/datasets/shhs/variables/dias120)**
+  - Several diastolic readings below 40 millimeters of mercury
+- Multiple occurrences found: **Low values in [dias220](https://sleepdata.org/datasets/shhs/variables/dias220)**
+  - Several diastolic readings below 40 millimeters of mercury
+- Multiple occurrences found: **Low values in [dias320](https://sleepdata.org/datasets/shhs/variables/dias320)**
+  - Several diastolic readings below 40 millimeters of mercury
+- Multiple occurrences found: **Low values in [diasbp](https://sleepdata.org/datasets/shhs/variables/diasbp)**
+  - Several average diastolic readings below 44 millimeters of mercury
+- Multiple occurences found: **Low values in [pm220a2](https://sleepdata.org/datasets/shhs/variables/pm220a2)**
+  - Several diastolic readings below 45 millimeters of mercury
+- Multiple occurences found: **Low values in [pm220b2](https://sleepdata.org/datasets/shhs/variables/pm220b2)**
+  - Several diastolic readings below 40 millimeters of mercury
+- Multiple occurences found: **Low values in [pm220c2](https://sleepdata.org/datasets/shhs/variables/pm220c2)**
+  - Several diastolic readings below 40 millimeters of mercury
+- One occurrence found: **[syst120](https://sleepdata.org/datasets/shhs/variables/syst120) value > 240 millimeters of mercury**
+- One occurrence found: **[trig](https://sleepdata.org/datasets/shhs/variables/trig) value > 1926 milligrams per deciliter**
+- One occurrence found: **[fvc](https://sleepdata.org/datasets/shhs/variables/fvc) value > 2763 liters**
+- One occurrence found: **[aavbnoh](https://sleepdata.org/datasets/shhs/variables/aavbnoh) value >200 beats per minute**
+- One occurrence found: **[aavbroh](https://sleepdata.org/datasets/shhs/variables/aavbroh) value > 200 beats per minute**
+- One occurrence found: **[amnbnoh](https://sleepdata.org/datasets/shhs/variables/amnbnoh) value > 197 beats per minute**
+  - Also several hundred instances of minimum heart rate below 20 beats per minute
+- One occurrence found: **[amnbroh](https://sleepdata.org/datasets/shhs/variables/amnbroh) value > 210 beats per minute**
+  - Also many instances of minimum heart rates below 30 beats per minute
+- Multiple occurrences found: **High and low values in [amxbnoh](https://sleepdata.org/datasets/shhs/variables/amxbnoh)**
+  - Several maximum heart rate readings with arousal above 300 beats per minute and below 50 beats per minute
+- Multiple occurrences found: **High and low values in [amxbrbh](https://sleepdata.org/datasets/shhs/variables/amxbrbh)**
+  - Several maximum heart rate readings with arousal above 300 beats per minute and below 40 beats per minute
+- Multiple occurrences found: **High values in [amxbroh](https://sleepdata.org/datasets/shhs/variables/amxbroh)**
+  - Several maximum heart rate readings with arousal above 300 beats per minute
+- Multiple occurrences found: **High values in [dmxbnbh](https://sleepdata.org/datasets/shhs/variables/dmxbnbh)**
+  - Several maximum heart rate readings with arousal above 300 beats per minute
+- Multiple occurrences found: **High values in [dmxbnoh](https://sleepdata.org/datasets/shhs/variables/dmxbnoh)**
+  - Several maximum heart rate readings with arousal above 400 beats per minute
+- Multiple occurrences found: **High values in [dmxbrbh](https://sleepdata.org/datasets/shhs/variables/dmxbrbh)**
+  - Several maximum heart rate readings with arousal above 400 beats per minute
+- Multiple occurrences found: **High values in [dmxbroh](https://sleepdata.org/datasets/shhs/variables/dmxbroh)**
+  - Several maximum heart rate readings with arousal above 300 beats per minute
+- Multiple occurrences found: **High values in [hmxbnbh](https://sleepdata.org/datasets/shhs/variables/hmxbnbh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [hmxbnoh](https://sleepdata.org/datasets/shhs/variables/hmxbnoh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [hmxbrbh](https://sleepdata.org/datasets/shhs/variables/hmxbrbh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- One occurrence found: **[hmxbroh](https://sleepdata.org/datasets/shhs/variables/hmxbroh) value > 460 beats per minute**
+- Multiple occurrences found: **High values in [smxbnbh](https://sleepdata.org/datasets/shhs/variables/smxbnbh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [smxbnoh](https://sleepdata.org/datasets/shhs/variables/smxbnoh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [smxbrbh](https://sleepdata.org/datasets/shhs/variables/smxbrbh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [smxbroh](https://sleepdata.org/datasets/shhs/variables/smxbroh)**
+  - Several maximum heart rate readings above 400 beats per minute
+- Multiple occurrences found: **High values in [alcoh](https://sleepdata.org/datasets/shhs/variables/alcoh)**
+  - Several instances of more than 50 alcoholic drinks per day
+- Multiple occurrences found: **High values in [ankbp](https://sleepdata.org/datasets/shhs/variables/ankbp)**
+  - Several instances of supine ankle blood pressure over 500 millimeters of mercury
+- Multiple occurrences found: **High values in [armbp](https://sleepdata.org/datasets/shhs/variables/armbp)**
+  - Several instances of supine arm blood pressure over 500 millimeters of mercury
+- Multiple occurrences found: **High values in [mnsao2nh](https://sleepdata.org/datasets/shhs/variables/mnsao2nh)**
+  - Several instances of low SaO2 percentage
+- Multiple occurrences found: **High values in [totminnap](https://sleepdata.org/datasets/shhs/variables/totminnap)**
+  - Several instances of nap lengths over 400 minutes
+- Multiple occurrences found: **Low values in [avg23bps_s2](https://sleepdata.org/datasets/shhs/variables/avg23bps_s2)**
+  - Several instances of average systolic blood pressures under 75 millimeters of mercury
+- Multiple occurrences found: **High values in [pm226d](https://sleepdata.org/datasets/shhs/variables/pm226d)**
+  - Several instances of right leg posterior systolic blood pressure over 250 millimeters of mercury
+- Multiple occurrences found: **Low values in [pm226d](https://sleepdata.org/datasets/shhs/variables/pm226d)**
+  - Several instances of right leg posterior systolic blood pressure below 75 millimeters of mercury
+- Multiple occurrences found: **High values in [pm226e](https://sleepdata.org/datasets/shhs/variables/pm226e)**
+  - Several instances of left leg posterior systolic blood pressure over 250 millimeters of mercury
+- Multiple occurences found: **Low values in [pm226e](https://sleepdata.org/datasets/shhs/variables/pm226e)**
+  - Several instances of left leg posterior systolic blood pressure below 70 millimeters of mercury
+- Multiple occurrences found: **High values in [pm226f](https://sleepdata.org/datasets/shhs/variables/pm226f)**
+  - Several instances of left leg posterior systolic blood pressure above 250 millimeters of mercury
+- Multiple occurrences found: **Low values in [pm226f](https://sleepdata.org/datasets/shhs/variables/pm226f)**
+  - Several instances of left leg posterior systolic blood pressure below 70 millimeters of mercury
+- Multiple occurrences found: **High values in [pm226g](https://sleepdata.org/datasets/shhs/variables/pm226g)**
+  - Several instances of right leg posterior systolic blood pressure over 250 millimeters of mercury
+- Multiple occurrences found: **Low values in [pm226g](https://sleepdata.org/datasets/shhs/variables/pm226g)**
+  - Several instances of right leg posterior systolic blood pressure below 70 millimeters of mercury
+- Multiple occurrences found: **High values in [lengpmnap](https://sleepdata.org/datasets/shhs/variables/lengpmnap)**
+  - Several instances of total nap time over 400 minutes
+- Multiple occurrences found: **High values in [totminfallslp](https://sleepdata.org/datasets/shhs/variables/totminfallslp)**
+  - Several instances of time to fall asleep over 200 minutes
+- Multiple occurrences found: **Low values in [systbp](https://sleepdata.org/datasets/shhs/variables/systbp)**
+  - Several instances of average systolic blood pressure below 70 millimeters of mercury
+- Multiple occurrences found: **High values in [minfa10](https://sleepdata.org/datasets/shhs/variables/minfa10)**
+  - Several instances of time to fall asleep over 200 minutes
+- One occurrence found: **[avesmk15](https://sleepdata.org/datasets/shhs/variables/avesmk15) value > 80**
+- Multiple occurrences found: **High values in [coffee15](https://sleepdata.org/datasets/shhs/variables/coffee15)**
+  - Several instances of over 20 cups of coffee per day
+- One occurrence found: **[shots10](https://sleepdata.org/datasets/shhs/variables/shots10) value > 10**
+- One occurrence found: **[mi2slp02](https://sleepdata.org/datasets/shhs/variables/mi2slp02) value > 300 minutes**
+- One occurrence found: **[ms209b](https://sleepdata.org/datasets/shhs/variables/ms209b) value >7**
+- Multiple occurrences found: **High values in [rpttimtoslp](https://sleepdata.org/datasets/shhs/variables/rpttimtoslp)**
+  - Several instances of time to fall asleep greater than 300 minutes
+- One occurrence found: **[sh324](https://sleepdata.org/datasets/shhs/variables/sh324) value > 110**
+- One occurrence found: **[sh325](https://sleepdata.org/datasets/shhs/variables/sh325) value > 20**
+- One occurrence found: **[syst220](https://sleepdata.org/datasets/shhs/variables/syst220) value > 240 millimeters of mercury**
+- One occurrence found: **[systbp](https://sleepdata.org/datasets/shhs/variables/systbp) value < 55 millimeters of mercury**
+- One occurrence found: **[davbnbh](https://sleepdata.org/datasets/shhs/variables/davbnbh) value > 200 beats per minute**
+- Multiple occurrences found: **Low values in [amnbnbh](https://sleepdata.org/datasets/shhs/variables/amnbnbh)**
+  - Many instances of minimum heart rate below 20 beats per minute
+- Multiple occurrences found: **Low values in [amnbrbh](https://sleepdata.org/datasets/shhs/variables/amnbrbh)**
+  - Several instances of minimum heart rate below 20 beats per minute
+- Several instances found: **High values in [amxbnbh](https://sleepdata.org/datasets/shhs/variables/amxbnbh)**
+  - Also several reported maximum heart rates below 50 beats per minute
+- One occurrence found: **[fuweight](https://sleepdata.org/datasets/shhs/variables/fuweight) contains some values that are in kilograms and other values that are in pounds**
