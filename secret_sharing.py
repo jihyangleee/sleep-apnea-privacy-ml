@@ -16,39 +16,6 @@ def apply_dp_noise(share: torch.Tensor, sigma: float) -> torch.Tensor:
     return share + torch.randn_like(share) * sigma
 
 
-class DHMasker:
-    """Pairwise DH-based masking for n clients.
-
-    For each pair (i, j) with i < j:
-        mask[(i,j)] = r_ij    (sender i adds when sending to j)
-        mask[(j,i)] = -r_ij   (sender j adds when sending to i)
-
-    Masks cancel on aggregation: sum_i(mask[i→j]) = 0 for every j.
-    """
-
-    def __init__(self, n_clients: int):
-        self.n = n_clients
-        self._masks: dict = {}
-
-    def refresh(self, shape):
-        self._masks.clear()
-        for i in range(self.n):
-            for j in range(i + 1, self.n):
-                r = torch.randn(shape)
-                self._masks[(i, j)] =  r
-                self._masks[(j, i)] = -r
-
-    def send(self, share: torch.Tensor, sender: int, receiver: int) -> torch.Tensor:
-        if sender == receiver:
-            return share
-        return share + self._masks[(sender, receiver)]
-
-    def recv(self, masked: torch.Tensor, receiver: int, sender: int) -> torch.Tensor:
-        if sender == receiver:
-            return masked
-        return masked - self._masks[(sender, receiver)]
-
-
 class BeaverProvider:
     """Simulated Beaver Triple dealer for MPC multiplication on secret shares.
 

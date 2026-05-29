@@ -27,20 +27,33 @@
       │  loss     = BCEWithLogitsLoss(logit, y)                        │
       └─────────────────────────────────────────────────────────────────┘
 
+  ** Beaver Triple (PolyAct 적용)
+  각 party j:  e_j = h_share_j - a_j  →  broadcast
+               f_j = h_share_j - b_j  →  broadcast
+  공개값:      e = h_linear - a  (a를 모르면 h_linear 복원 불가)
+               f = h_linear - b
+  결과:        act_share_j = c_j + f*a_j + e*b_j + [j=0]*e*f
+               Σ act_share_j = PolyAct(h_linear)  ← h_linear 비공개 상태
+
   [Backward]
-  coordinator → d_loss/d_h_linear = d_loss/d_h_act * PolyAct'(h_linear)
-             → 각 병원에 d_loss/d_h_linear 전송
-  병원 j     → d_loss/d_W_top1  += concat_share_j.T @ d_loss/d_h_linear
-             → d_loss/d_concat_share_j = d_loss/d_h_linear @ W_top1.T
-  병원 i     → d_loss/d_emb_i = Σⱼ d_loss/d_concat_share_j[:, 해당 슬라이스]
-             → d_loss/d_W_sub_i = x_i.T @ d_loss/d_emb_i * PolyAct'(linear(x_i))
-             → sub_model_i 업데이트
+  coordinator → d_loss/d_logit (BCELoss gradient)
+             → d_loss/d_act_share_j 브로드캐스트
+  병원 j     → d_loss/d_W_top2 += act_share_j.T @ d_loss
+             → d_loss/d_W_top1, d_loss/d_emb_i 역전파
   (시뮬레이션에서는 PyTorch autograd가 위 흐름을 자동 계산)
 
+  ** Gradient DP noise (label 보호)
+  d_loss/d_emb_i 가 bottom model로 흐르기 전에 Gaussian noise 주입.
+  gradient의 부호/크기에서 label을 역추론하는 공격을 차단.
+  (embedding 전송 시 DP noise와 동일한 sigma 사용)
+
 프라이버시 메커니즘
-  - Additive SS   : 개별 share는 정보이론적으로 랜덤 → 원본 embedding 복원 불가
-  - DP noise      : 전송 전 Gaussian noise 주입 → 통계적 추론 차단
-  - Rotating coord: 매 배치마다 coordinator 랜덤 선정 → semi-honest 신뢰 분산
+  - Additive SS       : 개별 share는 정보이론적으로 랜덤 → 원본 embedding 복원 불가
+  - DP noise (forward): 전송 전 Gaussian noise 주입 → 통계적 추론 차단
+  - DP noise (backward): gradient에 Gaussian noise 주입 → label 역추론 차단
+  - Beaver Triple     : h_linear 평문 재구성 없이 PolyAct 계산 → h_linear 비공개
+  - Rotating coord    : 매 배치마다 logit 합산 coordinator 랜덤 선정 → 신뢰 분산
+  - 노출 최소화       : coordinator가 보는 건 h_linear(32d) 아닌 logit(스칼라)뿐
 ```
 
 ---
@@ -153,13 +166,14 @@ Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
 | 항목 | 학습 | 추론 |
 |---|---|---|
 | 환자 raw feature | - | 병원별 encrypted slice만 전달 ✅ |
-| embedding 노출 | SS + DP noise로 보호 ✅ | ciphertext 교환 ✅ |
-| h_linear 노출 | coordinator 평문 열람 (semi-honest) ⚠️ | ciphertext, 누구도 복호화 불가 ✅ |
+| embedding 노출 | SS + DP noise (forward) ✅ | ciphertext 교환 ✅ |
+| label → gradient 역추론 | DP noise (backward) ✅ | 해당 없음 |
+| h_linear 노출 | Beaver Triple → 아무도 평문 미열람 ✅ | ciphertext, 누구도 복호화 불가 ✅ |
 | 모델 가중치 W_top | 병원들이 동일 보유 | additive share 분산 보유 ✅ |
-| 최종 logit | coordinator 평문 계산 ⚠️ | 환자만 복호화 ✅ |
+| 최종 logit | coordinator 스칼라 봄 ⚠️ | 환자만 복호화 ✅ |
 
-> ⚠️ 학습 단계 한계: coordinator가 `h_linear`와 `logit`을 평문으로 봄 (semi-honest 가정).
-> 완전한 학습 프라이버시를 위해서는 Beaver Triple MPC 또는 TEE 필요.
+> ⚠️ 학습 단계 한계: `h_linear`(32d)는 Beaver Triple로 보호되나,
+> coordinator가 최종 `logit`(스칼라 1개)을 평문으로 봄. loss 계산에 필수적인 한계.
 
 ---
 
@@ -168,7 +182,7 @@ Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
 ```
 ├── dataset.py         데이터 로드 (SHHS / DREAMT / 합성)
 ├── model.py           HospitalModel (학습+추론 통합), ServerTopModel, PolyActivation
-├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider, DHMasker
+├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider
 ├── simulate.py        run_distributed_simulation (신규), run_vertical_simulation (레거시)
 ├── he_client.py       build_he_context, HospitalHE, HEInference (benchmark 호환)
 ├── client.py          VerticalClient (레거시 학습)

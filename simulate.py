@@ -9,7 +9,7 @@ from dataset import (
 from client import VerticalClient
 from server import VerticalFLServer
 from model import VerticalHeartNet, HospitalModel
-from secret_sharing import additive_split, apply_dp_noise
+from secret_sharing import additive_split, apply_dp_noise, BeaverProvider
 
 NUM_CLIENTS = 3
 EMB_DIM     = 16
@@ -35,15 +35,13 @@ def run_vertical_simulation(
     n_epochs: int = 30,
     batch_size: int = 32,
 ):
-    """Vertical FL training with additive Secret Sharing + DH masking.
+    """Vertical FL training with additive Secret Sharing.
 
     Privacy model:
       - Each client only sees its own feature columns.
       - Embeddings are additively secret-shared before being "sent" to
         the coordinator; the coordinator never sees a full embedding from
         any single client.
-      - Pairwise DH masks protect share values in transit (masks cancel
-        on aggregation so the math is unaffected).
       - Top-model linear1 is evaluated in shares (partial_i = W1 @ share_i);
         aggregation at the coordinator reconstructs the full hidden vector
         before the non-linear PolyAct, which requires a trusted coordinator
@@ -171,7 +169,6 @@ def run_distributed_simulation(
     - Embeddings are additively secret-shared before transmission.
     - DP noise (sigma) is injected into each share in transit, so even a
       curious coordinator only sees noisy shares — not the real embedding.
-    - DH pairwise masks protect wire-level values (masks cancel on aggregation).
     - Top-model non-linear (PolyAct) is computed via Beaver Triple: parties
       exchange O(hidden_dim) values instead of reconstructing the full embedding.
 
@@ -231,6 +228,7 @@ def run_distributed_simulation(
     params.extend(shared_W2.parameters())
     optimizer = torch.optim.Adam(params, lr=1e-3)
     criterion = nn.BCEWithLogitsLoss()
+    beaver    = BeaverProvider(NUM_CLIENTS)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     print(f"\n[Distributed FL] 학습 시작 - {n_epochs} epochs, batch={batch_size}")
@@ -249,9 +247,13 @@ def run_distributed_simulation(
                 hospitals[i].local_emb(X_trains[i][idx]) for i in range(NUM_CLIENTS)
             ]
 
+            # Gradient DP: add noise to ∂L/∂emb_i before it flows into bottom models.
+            # Prevents passive hospitals from inferring the label via gradient magnitude/sign.
+            if dp_sigma > 0:
+                for emb in local_embs:
+                    emb.register_hook(lambda g: g + torch.randn_like(g) * dp_sigma)
+
             # Step 2: additive SS split + DP noise before transmission
-            # Each share is already indistinguishable from random (SS property),
-            # so DH masking is redundant; DP noise is sufficient.
             all_shares = [additive_split(emb, n=NUM_CLIENTS) for emb in local_embs]
 
             # Step 3: DP noise -> receive and concatenate
@@ -270,15 +272,21 @@ def run_distributed_simulation(
                 for j in range(NUM_CLIENTS)
             ]
 
-            # Step 5: randomly chosen coordinator sums h_shares → h_linear, applies PolyAct
-            # Rotating coordinator distributes the semi-honest trust assumption
-            # so no single hospital always sees h_linear.
-            coord = random.randrange(NUM_CLIENTS)
-            h_linear = sum(h_shares)
-            h_act    = h_linear * (h_linear + 0.5)   # PolyAct
+            # Step 5: Beaver Triple — PolyAct without any party seeing h_linear
+            # h_linear은 재구성되지 않음; 각 party는 act_share만 보유
+            triples    = beaver.generate_triple(h_shares[0].shape)
+            act_shares = beaver.poly_act(h_shares, triples)
 
-            # Step 6: coordinator applies Linear2 → logit
-            logit = hospitals[coord].top_W2(h_act)
+            # Step 6: each hospital applies Linear2 to its act_share
+            logit_shares = [
+                hospitals[j].logit_share(act_shares[j], j == 0)
+                for j in range(NUM_CLIENTS)
+            ]
+
+            # Step 7: randomly chosen coordinator sums logit shares → scalar logit
+            # coordinator가 보는 건 h_linear(32d) 아닌 logit(스칼라)뿐
+            coord = random.randrange(NUM_CLIENTS)
+            logit = sum(logit_shares)
             loss  = criterion(logit, y_batch.unsqueeze(1))
             loss.backward()
             optimizer.step()

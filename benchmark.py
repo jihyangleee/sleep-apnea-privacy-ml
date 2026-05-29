@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 from model import VerticalHeartNet
 from he_client import HEInference, build_he_context
-from secret_sharing import additive_split, DHMasker
+from secret_sharing import additive_split
 from simulate import NUM_CLIENTS, EMB_DIM
 
 MODEL_PATH = "vertical_model.pt"
@@ -174,9 +174,9 @@ print(f"  Plaintext is {overhead:.0f}x faster - HE adds {np.mean(t_total)*1e3:.0
 
 
 # -----------------------------------------------------------------------------
-# 3. SS+DH vs Plain Concat
+# 3. SS vs Plain Concat
 # -----------------------------------------------------------------------------
-banner("3 / 3  Plain / SS / SS+DH comparison  (training batch)")
+banner("3 / 3  Plain / SS comparison  (training batch)")
 
 print("""
   +-----------------------------------------------------------------+
@@ -184,20 +184,13 @@ print("""
   |    torch.cat([emb_A, emb_B, emb_C])                            |
   |    Coordinator sees all raw embeddings.                         |
   |                                                                 |
-  |  SS only  (additive secret sharing, no transmission mask)       |
+  |  SS  (additive secret sharing + DP noise)                       |
   |    emb_i --additive_split--> [share_i0, share_i1, share_i2]    |
-  |    Shares distributed as-is — eavesdropper on the wire         |
-  |    can intercept a share, but cannot reconstruct emb_i alone.   |
-  |                                                                 |
-  |  SS + DH masking  (current full implementation)                 |
-  |    Same as SS, but each share_ij is masked with r_ij before     |
-  |    sending; r_ij + r_ji = 0 so masks cancel on aggregation.    |
-  |    Even a wiretapper who captures a masked share sees only      |
-  |    random noise — cannot link it to any embedding.              |
+  |    Each share is information-theoretically random — no party    |
+  |    can reconstruct emb_i from its share alone.                  |
+  |    DP noise added on top for gradient-level label protection.   |
   +-----------------------------------------------------------------+
 """)
-
-dh_masker = DHMasker(NUM_CLIENTS)
 
 def make_embs(bs):
     return [torch.randn(bs, EMB_DIM, requires_grad=True) for _ in range(NUM_CLIENTS)]
@@ -210,7 +203,7 @@ for _ in range(N_BATCHES):
     torch.cat(embs, dim=1)
     t_plain_cat.append(time.perf_counter() - t0)
 
-# SS only (no DH masking)
+# SS only
 t_ss_only = []
 for _ in range(N_BATCHES):
     embs = make_embs(BATCH_SIZE)
@@ -222,42 +215,18 @@ for _ in range(N_BATCHES):
         cat_shares.append(torch.cat(received, dim=1))
     t_ss_only.append(time.perf_counter() - t0)
 
-# SS + DH masking
-t_ss_dh = []
-for _ in range(N_BATCHES):
-    embs = make_embs(BATCH_SIZE)
-    t0 = time.perf_counter()
-    dh_masker.refresh((BATCH_SIZE, EMB_DIM))
-    shares = [additive_split(e, n=NUM_CLIENTS) for e in embs]
-    cat_shares = []
-    for j in range(NUM_CLIENTS):
-        received = [dh_masker.recv(dh_masker.send(shares[i][j], i, j), j, i)
-                    for i in range(NUM_CLIENTS)]
-        cat_shares.append(torch.cat(received, dim=1))
-    t_ss_dh.append(time.perf_counter() - t0)
-
-cat_us    = np.array(t_plain_cat) * 1e6
-ss_us     = np.array(t_ss_only)   * 1e6
-ss_dh_us  = np.array(t_ss_dh)     * 1e6
+cat_us = np.array(t_plain_cat) * 1e6
+ss_us  = np.array(t_ss_only)   * 1e6
 
 section(f"Aggregate statistics  (n={N_BATCHES} batches x {BATCH_SIZE} samples)")
 print(f"  {'Plain concat':<30}  avg={cat_us.mean():7.1f} us  std={cat_us.std():5.1f}")
-print(f"  {'SS only':<30}  avg={ss_us.mean():7.1f} us  std={ss_us.std():5.1f}")
-print(f"  {'SS + DH masking':<30}  avg={ss_dh_us.mean():7.1f} us  std={ss_dh_us.std():5.1f}")
+print(f"  {'SS':<30}  avg={ss_us.mean():7.1f} us  std={ss_us.std():5.1f}")
 
 section("Visual comparison (per batch)")
-max_us = ss_dh_us.mean()
-print(f"  Plain   {bar(cat_us.mean()/max_us)}  {cat_us.mean():.1f} us")
-print(f"  SS      {bar(ss_us.mean()/max_us)}  {ss_us.mean():.1f} us  "
+max_us = ss_us.mean()
+print(f"  Plain  {bar(cat_us.mean()/max_us)}  {cat_us.mean():.1f} us")
+print(f"  SS     {bar(1.0)}  {ss_us.mean():.1f} us  "
       f"(+{ss_us.mean()-cat_us.mean():.1f} us vs plain,  {ss_us.mean()/cat_us.mean():.0f}x)")
-print(f"  SS+DH   {bar(1.0)}  {ss_dh_us.mean():.1f} us  "
-      f"(+{ss_dh_us.mean()-ss_us.mean():.1f} us vs SS,   {ss_dh_us.mean()/ss_us.mean():.0f}x)")
-
-section("DH masking incremental cost")
-dh_cost = ss_dh_us.mean() - ss_us.mean()
-print(f"  SS only -> SS+DH : +{dh_cost:.1f} us per batch  ({dh_cost/BATCH_SIZE:.2f} us per sample)")
-print(f"  DH adds pairwise mask gen + apply/remove ({NUM_CLIENTS*(NUM_CLIENTS-1)//2} pairs)")
-print(f"  => Wire-level security for +{dh_cost:.1f} us extra per batch")
 
 
 # -----------------------------------------------------------------------------
@@ -281,8 +250,7 @@ print(f"""
   Training overhead (per batch, batch_size={BATCH_SIZE})
   +-----------------------------------------------------------+
   |  Plain concat               |  {cat_us.mean():>6.1f} us                 |
-  |  SS only                    |  {ss_us.mean():>6.1f} us  (+{ss_us.mean()-cat_us.mean():.1f} us vs plain)  |
-  |  SS + DH masking            |  {ss_dh_us.mean():>6.1f} us  (+{ss_dh_us.mean()-ss_us.mean():.1f} us vs SS)    |
+  |  SS                         |  {ss_us.mean():>6.1f} us  (+{ss_us.mean()-cat_us.mean():.1f} us vs plain)  |
   |  Privacy gain               |  Embeddings never exposed  |
   +-----------------------------------------------------------+
 """)

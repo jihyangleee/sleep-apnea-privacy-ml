@@ -16,7 +16,7 @@ MODEL_PATH = "vertical_model.pt"
 ENTRY_LABELS = ["Hospital A", "Hospital B", "Hospital C"]
 
 
-# ── Old vertical FL (SS + DH masking, semi-honest server) ────────────────────
+# ── Old vertical FL (SS, semi-honest server) ─────────────────────────────────
 
 def run_vertical_fl(csv_path: str = None, dreamt_dir: str = None):
     """Vertical FL 학습 후 모델 + 스케일러 저장 (semi-honest server 가정)."""
@@ -35,7 +35,7 @@ def run_vertical_fl(csv_path: str = None, dreamt_dir: str = None):
     print(f"[Vertical FL] model saved -> {MODEL_PATH}")
 
 
-# ── New distributed FL (SS + DH masking + DP noise + Beaver Triple) ──────────
+# ── New distributed FL (SS + DP noise + Beaver Triple) ───────────────────────
 
 def run_distributed_fl(
     csv_path: str = None,
