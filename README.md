@@ -185,6 +185,9 @@ Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
 ├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider
 ├── simulate.py        run_distributed_simulation (신규), run_vertical_simulation (레거시)
 ├── he_client.py       build_he_context, HospitalHE, HEInference (benchmark 호환)
+├── hospital_app.py    FastAPI 병원 서버 (병원별 독립 실행)
+├── watch_app.py       Galaxy Watch 역할 웹 클라이언트 (다른 컴퓨터에서 실행)
+├── schemas.py         FastAPI Pydantic 요청/응답 모델
 ├── client.py          VerticalClient (레거시 학습)
 ├── server.py          VerticalFLServer (레거시 학습)
 ├── benchmark.py       HE vs 평문 / SS overhead 벤치마크
@@ -218,7 +221,58 @@ python main.py --mode distributed --dp-sigma 0.005
 python main.py --mode vertical
 ```
 
-### HE 추론 데모
+### Watch 클라이언트 웹앱 (다른 컴퓨터에서 실행)
+
+```bash
+# Watch 컴퓨터에서
+COORDINATOR_URL=http://<병원서버IP>:8001 uvicorn watch_app:app --host 0.0.0.0 --port 9000
+```
+
+브라우저에서 `http://localhost:9000` 접속 → 수치 입력 → 암호화 후 예측 요청
+
+```
+[Watch 컴퓨터 :9000]               [병원 컴퓨터]
+  feature 입력 폼                   :8001  hospital_app
+  CKKS 암호화 (secret key 보유)     :8002  hospital_app
+  POST /infer ──────────────────▶   :8003  hospital_app
+  enc_logit 수신
+  복호화 → 확률 표시
+```
+
+### FastAPI 서버 (병원별 독립 실행)
+
+```bash
+pip install fastapi uvicorn httpx
+
+# 터미널 3개에서 각각 실행
+HOSPITAL_ID=0 uvicorn hospital_app:app --port 8001
+HOSPITAL_ID=1 uvicorn hospital_app:app --port 8002
+HOSPITAL_ID=2 uvicorn hospital_app:app --port 8003
+```
+
+```bash
+# 체크포인트 없을 때 — 서버 실행 후 학습 트리거
+curl -X POST http://localhost:8001/train
+
+# Galaxy Watch 추론 요청 (coordinator 병원 선택)
+# Watch: POST /infer with {enc_xi_b64: {"0": ..., "1": ..., "2": ...}}
+# 응답: {enc_logit_b64: "..."} → Watch가 복호화 → 수면무호흡 확률
+
+# 헬스 체크
+curl http://localhost:8001/health
+```
+
+**추론 내부 흐름 (3라운드 병원간 HTTP):**
+```
+Watch → POST /infer (coordinator)
+  Round 1: coordinator → 각 병원 /compute_emb   (enc_xi → enc_emb)
+  Round 2: coordinator → 각 병원 /compute_h_share (enc_emb_all → enc_h_share)
+           coordinator: Σenc_h_share → PolyAct → enc_h_act
+  Round 3: coordinator → 각 병원 /compute_logit_share (enc_h_act → enc_logit_share)
+           coordinator: Σenc_logit_share = enc_logit → Watch
+```
+
+### HE 추론 데모 (시뮬레이션)
 
 ```bash
 python main.py --mode he-infer

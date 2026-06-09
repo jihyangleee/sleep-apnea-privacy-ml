@@ -1,6 +1,7 @@
 import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from dataset import (
     load_shhs_data, load_dreamt_data, generate_dummy_data,
@@ -116,15 +117,15 @@ def run_vertical_simulation(
                 concat_shares.append(torch.cat(received, dim=1))
                 # concat_shares[j]: (batch, NUM_CLIENTS * EMB_DIM)
 
-            # ── Step 4: Distributed linear1 — each client applies W1 to its share ──
-            # sum_j linear1(concat_shares[j]) == linear1(cat(embeddings))  [linearity]
-            # This is the core SS property: linear computation decomposes over shares.
-            partial_h = [server.top_model.linear1(cs) for cs in concat_shares]
+            # ── Step 4: Distributed linear — each party applies top W to its share ──
+            # sum_j( W @ share_j ) = W @ cat(embs)  [linearity; bias added once]
+            partial_logits = [
+                F.linear(cs, server.top_model.linear.weight) for cs in concat_shares
+            ]
+            partial_logits[0] = partial_logits[0] + server.top_model.linear.bias
 
-            # ── Step 5: Coordinator aggregates, applies PolyAct, then Linear2 ──
-            h_linear = sum(partial_h)
-            h_act    = server.top_model.act(h_linear)
-            logit    = server.top_model.linear2(h_act)   # → (batch, 1)
+            # ── Step 5: Coordinator aggregates → logit ────────────────────────
+            logit = sum(partial_logits)   # → (batch, 1)
 
             # ── Step 6: Loss + backward ────────────────────────────────────
             loss = server.criterion(logit, y_batch.to(server.device).unsqueeze(1))
@@ -159,20 +160,18 @@ def run_distributed_simulation(
     batch_size: int = 32,
     dp_sigma: float = 0.01,
     emb_dim: int = 16,
-    top_hidden: int = 32,
 ):
     """Fully distributed VFL training — no central server sees any embedding.
 
     Privacy model
     -------------
-    - Sub-model runs locally on each hospital's own features (private).
+    - Sub-model runs locally on each hospital (private features never shared).
     - Embeddings are additively secret-shared before transmission.
-    - DP noise (sigma) is injected into each share in transit, so even a
-      curious coordinator only sees noisy shares — not the real embedding.
-    - Top-model non-linear (PolyAct) is computed via Beaver Triple: parties
-      exchange O(hidden_dim) values instead of reconstructing the full embedding.
+    - DP noise injected into each share in transit.
+    - Top-model is a single linear layer → decomposes over additive shares
+      without any Beaver Triple (linearity eliminates the need for MPC).
 
-    Returns: (hospitals, shared_top_W1, shared_top_W2, scaler)
+    Returns: (hospitals, shared_W, scaler)
     """
     # ── Data loading ──────────────────────────────────────────────────────────
     if dreamt_dir is not None:
@@ -193,17 +192,14 @@ def run_distributed_simulation(
     for i, label in enumerate(SLEEP_CLIENT_LABELS):
         print(f"  hospital {i}: {label}")
     print(f"  DP sigma={dp_sigma}  (embedding share 전송 시 Gaussian noise)")
-    print(f"  Top-model: 완전 linear — SS만으로 분산 계산, Beaver Triple 불필요")
+    print(f"  Top-model: 단일 linear — SS 분해로 Beaver Triple 없이 분산 계산")
 
-    # ── Build hospitals with SHARED top-model weights ─────────────────────────
+    # ── Build hospitals with SHARED single top-model ──────────────────────────
     total_emb = emb_dim * NUM_CLIENTS
-    shared_W1 = nn.Linear(total_emb, top_hidden)
-    shared_W2 = nn.Linear(top_hidden, 1)
+    shared_W  = nn.Linear(total_emb, 1)
 
     hospitals = [
-        HospitalModel(
-            i, SLEEP_FEATURE_GROUPS, emb_dim, top_hidden, shared_W1, shared_W2
-        )
+        HospitalModel(i, SLEEP_FEATURE_GROUPS, emb_dim, shared_W)
         for i in range(NUM_CLIENTS)
     ]
 
@@ -220,14 +216,13 @@ def run_distributed_simulation(
     y_test  = torch.tensor(partitions[0]["y_test"],  dtype=torch.float32)
     n = len(y_train)
 
-    # ── Optimizer: all sub-models + shared top model ──────────────────────────
+    # ── Optimizer: all sub-models + shared top linear ─────────────────────────
     params = []
     for h in hospitals:
         params.extend(h.sub.parameters())
-    params.extend(shared_W1.parameters())
-    params.extend(shared_W2.parameters())
+    params.extend(shared_W.parameters())
     optimizer = torch.optim.Adam(params, lr=1e-3)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCELoss()
     beaver    = BeaverProvider(NUM_CLIENTS)
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -247,16 +242,15 @@ def run_distributed_simulation(
                 hospitals[i].local_emb(X_trains[i][idx]) for i in range(NUM_CLIENTS)
             ]
 
-            # Gradient DP: add noise to ∂L/∂emb_i before it flows into bottom models.
-            # Prevents passive hospitals from inferring the label via gradient magnitude/sign.
+            # DP on gradients: prevents label inference from gradient sign/magnitude
             if dp_sigma > 0:
                 for emb in local_embs:
                     emb.register_hook(lambda g: g + torch.randn_like(g) * dp_sigma)
 
-            # Step 2: additive SS split + DP noise before transmission
+            # Step 2: additive SS split
             all_shares = [additive_split(emb, n=NUM_CLIENTS) for emb in local_embs]
 
-            # Step 3: DP noise -> receive and concatenate
+            # Step 3: DP noise in transit → each hospital receives concat of noisy shares
             concat_shares = []
             for j in range(NUM_CLIENTS):
                 received = [
@@ -266,28 +260,23 @@ def run_distributed_simulation(
                 concat_shares.append(torch.cat(received, dim=1))
             # concat_shares[j]: (batch, NUM_CLIENTS * emb_dim) + DP noise
 
-            # Step 4: each hospital applies Linear1 to its share (no bias except j=0)
-            h_shares = [
-                hospitals[j].h_share(concat_shares[j], j == 0)
-                for j in range(NUM_CLIENTS)
-            ]
-
-            # Step 5: Beaver Triple — PolyAct without any party seeing h_linear
-            # h_linear은 재구성되지 않음; 각 party는 act_share만 보유
-            triples    = beaver.generate_triple(h_shares[0].shape)
-            act_shares = beaver.poly_act(h_shares, triples)
-
-            # Step 6: each hospital applies Linear2 to its act_share
+            # Step 4: each hospital applies shared top linear to its concat share
+            # sum_j logit_share_j = W @ cat(embs) + b = logit  [by linearity]
             logit_shares = [
-                hospitals[j].logit_share(act_shares[j], j == 0)
+                hospitals[j].logit_share(concat_shares[j], j == 0)
                 for j in range(NUM_CLIENTS)
             ]
 
-            # Step 7: randomly chosen coordinator sums logit shares → scalar logit
-            # coordinator가 보는 건 h_linear(32d) 아닌 logit(스칼라)뿐
-            coord = random.randrange(NUM_CLIENTS)
-            logit = sum(logit_shares)
-            loss  = criterion(logit, y_batch.unsqueeze(1))
+            # Step 5: Beaver Triple sigmoid — σ(logit) ≈ 0.5 + 0.197x - 0.004x³
+            # logit stays in share form; no party reconstructs the raw logit.
+            # x³ needs 2 multiplications → 2 triples.
+            triple1 = beaver.generate_triple(logit_shares[0].shape)
+            triple2 = beaver.generate_triple(logit_shares[0].shape)
+            pred_shares = beaver.sigmoid_approx(logit_shares, triple1, triple2)
+
+            # Label holder sums pred shares → sees only the final prediction [0,1]
+            pred = sum(pred_shares).clamp(1e-6, 1 - 1e-6)
+            loss = criterion(pred, y_batch.unsqueeze(1))
             loss.backward()
             optimizer.step()
 
@@ -300,15 +289,13 @@ def run_distributed_simulation(
                     [hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)],
                     dim=1,
                 )
-                h1     = shared_W1(test_embs)
-                h1_act = h1 * (h1 + 0.5)
-                logit  = shared_W2(h1_act)
-                pred   = (torch.sigmoid(logit.squeeze()) > 0.5).float()
-                acc    = (pred == y_test).float().mean().item()
+                logit = shared_W(test_embs)
+                pred  = (logit.squeeze() > 0).float()
+                acc   = (pred == y_test).float().mean().item()
             print(
                 f"  Epoch {epoch:3d}/{n_epochs} | "
                 f"loss={epoch_loss/n_batches:.4f} | test_acc={acc:.4f}"
             )
 
     print("[Distributed FL] 학습 완료")
-    return hospitals, shared_W1, shared_W2, scaler
+    return hospitals, shared_W, scaler

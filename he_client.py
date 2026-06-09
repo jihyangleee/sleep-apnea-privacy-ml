@@ -22,7 +22,7 @@ from model import VerticalHeartNet
 
 
 def build_he_context() -> ts.Context:
-    # Level budget: sub-model PolyAct (-1) + top-model PolyAct (-1) = 2 levels consumed
+    # Level budget: sub-model CubicAct z*(0.197+0.004z²) (-2) + linear top-model (-0) = 2 levels consumed
     # [60,40,40,40,40,40,60] provides 5 usable levels -> 3 remain after inference.
     ctx = ts.context(
         ts.SCHEME_TYPE.CKKS,

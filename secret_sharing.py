@@ -88,3 +88,26 @@ class BeaverProvider:
         """
         h2_shares = self.mul(h_shares, h_shares, triples)
         return [h2_shares[i] + 0.5 * h_shares[i] for i in range(self.n)]
+
+    def sigmoid_approx(
+        self,
+        x_shares: List[torch.Tensor],
+        triples1: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        triples2: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> List[torch.Tensor]:
+        """Securely compute σ(x) ≈ 0.5 + 0.197x - 0.004x³.
+
+        Two Beaver Triples needed because x³ = x² * x (two multiplications):
+          triples1 → x² = x * x
+          triples2 → x³ = x² * x
+
+        Only party 0 adds the constant 0.5 (same pattern as bias in logit_share).
+        Gradient flows through all tensor ops for backprop.
+
+        sum(result_i) = σ(sum(x_i))  without any party reconstructing x.
+        """
+        x2_shares = self.mul(x_shares, x_shares, triples1)
+        x3_shares = self.mul(x2_shares, x_shares, triples2)
+        result = [0.197 * x_shares[i] - 0.004 * x3_shares[i] for i in range(self.n)]
+        result[0] = result[0] + 0.5
+        return result

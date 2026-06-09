@@ -13,6 +13,7 @@ __pycache__/
 
 # 가상환경
 venv/
+venv_win/
 .venv/
 env/
 

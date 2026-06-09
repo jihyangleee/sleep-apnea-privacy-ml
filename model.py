@@ -4,42 +4,45 @@ import torch.nn.functional as F
 
 
 class PolyActivation(nn.Module):
-    """HE-compatible polynomial activation: f(x) = x² + 0.5x.
+    """HE-compatible cubic ReLU approximation: f(x) = 0.197x + 0.004x³.
 
-    Factored as x * (x + 0.5) so that HE inference needs only one
-    ciphertext multiplication (one level consumed) rather than two.
+    Factored as x * (0.197 + 0.004*x²) so CKKS inference needs exactly two
+    ciphertext multiplications (-2 HE levels), same total as the old
+    quadratic sub + quadratic top approach.
     """
     def forward(self, x):
-        return x * (x + 0.5)
+        return 0.197 * x + 0.004 * x ** 3
 
 
 class ClientSubModel(nn.Module):
-    """Vertical FL client sub-model: feature columns → embedding."""
+    """Vertical FL sub-model: feature columns → embedding.
+
+    Structure: Linear → CubicAct → Linear
+    """
     def __init__(self, input_dim: int, emb_dim: int = 16):
         super().__init__()
         self.linear = nn.Linear(input_dim, emb_dim)
         self.act    = PolyActivation()
+        self.embed  = nn.Linear(emb_dim, emb_dim)
 
     def forward(self, x):
-        return self.act(self.linear(x))
+        return self.embed(self.act(self.linear(x)))
 
 
 class ServerTopModel(nn.Module):
     """Vertical FL top-model: concatenated embeddings → logit.
 
-    Structure: Linear1 → PolyAct → Linear2 → logit
-      - PolyAct captures cross-hospital feature interactions in the hidden layer.
-      - sigmoid is NOT applied here; BCEWithLogitsLoss handles it during training,
-        and the patient applies sigmoid locally after decrypting in inference.
+    Single linear layer (no hidden, no activation).
+    Column-wise split lets each hospital compute its own partial logit
+    from its own embedding without any inter-hospital communication:
+      logit = Σ_i (emb_i @ W_top_i.T) + b
     """
-    def __init__(self, total_emb_dim: int, hidden: int = 32):
+    def __init__(self, total_emb_dim: int):
         super().__init__()
-        self.linear1 = nn.Linear(total_emb_dim, hidden)
-        self.act     = PolyActivation()
-        self.linear2 = nn.Linear(hidden, 1)
+        self.linear = nn.Linear(total_emb_dim, 1)
 
     def forward(self, x):
-        return self.linear2(self.act(self.linear1(x)))
+        return self.linear(x)
 
 
 class VerticalHeartNet(nn.Module):
@@ -59,44 +62,38 @@ class VerticalHeartNet(nn.Module):
 
 
 class HospitalModel(nn.Module):
-    """Per-hospital model: private sub-model + distributed top-model.
+    """Per-hospital model: private sub-model + shared column slice of top-model.
 
-    Training  — secret shares + Beaver Triple (no central server sees embeddings)
+    Training  — additive SS; linear top-model decomposes over shares (no Beaver Triple needed)
     Inference — CKKS ciphertext arithmetic (patient features never decrypted)
 
-    The top-model weights (top_W1, top_W2) are logically identical across all
-    hospitals. In simulation, every HospitalModel receives references to the
-    same nn.Linear objects. In production they would be synchronised via
-    AllReduce / FedAvg gradient aggregation.
+    Inference protocol (3 hospitals, 1 round):
+      1. Each hospital: enc(features_i) → sub_model → enc(emb_i) → W_top_i → enc(logit_i)
+      2. Coordinator: enc(logit) = Σ enc(logit_i) + b_top
+      3. Patient decrypts enc(logit) and applies exact sigmoid locally
     """
 
     def __init__(
         self,
         hospital_id: int,
-        feature_groups: list,           # all hospitals' feature-column lists
+        feature_groups: list,
         emb_dim: int = 16,
-        top_hidden: int = 32,
-        shared_top_W1: "nn.Linear | None" = None,
-        shared_top_W2: "nn.Linear | None" = None,
+        shared_top_W: "nn.Linear | None" = None,
     ):
         super().__init__()
-        self.id            = hospital_id
+        self.id             = hospital_id
         self.feature_groups = [list(fg) for fg in feature_groups]
-        self.emb_dim       = emb_dim
-        self.n             = len(feature_groups)
-        self.n_features    = sum(len(fg) for fg in feature_groups)
-        self.total_emb     = emb_dim * self.n
+        self.emb_dim        = emb_dim
+        self.n              = len(feature_groups)
+        self.n_features     = sum(len(fg) for fg in feature_groups)
+        self.total_emb      = emb_dim * self.n
 
-        # Sub-model: private to this hospital, processes own feature columns only
         self.sub = ClientSubModel(len(feature_groups[hospital_id]), emb_dim)
 
-        # Top-model: shared weights (same nn.Linear instance across all hospitals)
-        if shared_top_W1 is None:
-            self.top_W1 = nn.Linear(self.total_emb, top_hidden)
-            self.top_W2 = nn.Linear(top_hidden, 1)
+        if shared_top_W is None:
+            self.top_W = nn.Linear(self.total_emb, 1)
         else:
-            self.top_W1 = shared_top_W1
-            self.top_W2 = shared_top_W2
+            self.top_W = shared_top_W
 
         self._he_built = False
 
@@ -106,189 +103,122 @@ class HospitalModel(nn.Module):
         """Sub-model forward on own features. Plaintext, stays local."""
         return self.sub(x_local)
 
-    def h_share(self, cat_share: torch.Tensor, is_first: bool) -> torch.Tensor:
-        """Apply W1 (no bias) to a received share. Only party 0 adds bias.
+    def logit_share(self, cat_share: torch.Tensor, is_first: bool) -> torch.Tensor:
+        """Apply shared top linear (no bias) to a received concat-embedding share.
 
-        sum_j( h_share_j ) = full_cat @ W1.T + W1.bias = h_linear
+        sum_j( logit_share_j ) = cat(embs) @ W_top.T + W_top.bias = logit
+        Linearity over additive shares removes the need for Beaver Triple.
         """
-        h = F.linear(cat_share, self.top_W1.weight)
+        logit = F.linear(cat_share, self.top_W.weight)
         if is_first:
-            h = h + self.top_W1.bias
-        return h
-
-    def logit_share(self, act_share: torch.Tensor, is_first: bool) -> torch.Tensor:
-        """Apply W2 (no bias) to an activation share. Only party 0 adds bias."""
-        logit = F.linear(act_share, self.top_W2.weight)
-        if is_first:
-            logit = logit + self.top_W2.bias
+            logit = logit + self.top_W.bias
         return logit
 
     # ── Inference helpers (CKKS) ──────────────────────────────────────────────
 
     def build_he_weights(
         self,
-        W1_T_share,   # np.ndarray (total_emb, top_hidden): additive share of W1.T
-        b1_share,     # np.ndarray (top_hidden,): additive share of b1
-        W2_T_share,   # np.ndarray (top_hidden, 1): additive share of W2.T
-        b2_share,     # np.ndarray (1,): additive share of b2
+        W_top_i: "np.ndarray",
+        b_top:   "np.ndarray | None" = None,
     ):
-        """Store sub-model weights and pre-split top-model shares for CKKS inference.
+        """Pre-compute weight lists for CKKS inference.
 
-        Sub-model: hospital i receives only enc(features_i) from the watch.
-          W_sub_T (|fg_i|, emb_dim) applied directly — no zero-padding needed.
-
-        Top-model: W1 and W2 are additively split across hospitals.
-          W1_T_share (total_emb, top_hidden) is stored as n row-blocks of
-          (emb_dim, top_hidden), one block per source embedding.
-          This lets each hospital compute its W1_share contribution from
-          the individual enc(emb_j) ciphertexts without forming enc(concat).
-
-          math: enc(emb_j) @ W1_T_share[j*d:(j+1)*d, :]  for each j
-                sum over j  =  enc(concat) @ W1_T_share  =  enc(h_linear share_i)
-                sum over i  =  enc(h_linear)  ✓
+        W_top_i : (1, emb_dim) — this hospital's column slice of the top linear:
+                  W_top.weight[:, id*emb_dim : (id+1)*emb_dim]
+        b_top   : (1,) — shared top-model bias.
+                  Every hospital stores it; coordinator adds it once after summing.
         """
         import numpy as np
 
-        W_sub = self.sub.linear.weight.detach().numpy()   # (emb_dim, |fg_i|)
-        b_sub = self.sub.linear.bias.detach().numpy()     # (emb_dim,)
-        self._W_sub_T = W_sub.T.astype(np.float64).tolist()   # (|fg_i|, emb_dim)
-        self._b_sub   = b_sub.astype(np.float64).tolist()     # (emb_dim,)
+        # Sub-model first linear — zero-pad input to power-of-2 for TenSEAL mm_
+        W_sub  = self.sub.linear.weight.detach().numpy()   # (emb_dim, |fg_i|)
+        b_sub  = self.sub.linear.bias.detach().numpy()     # (emb_dim,)
+        n_feat = W_sub.shape[1]
+        pad_to = max(1 << (n_feat - 1).bit_length(), 4)
+        W_pad  = np.zeros((W_sub.shape[0], pad_to), dtype=np.float64)
+        W_pad[:, :n_feat] = W_sub
+        self._W_sub_T = W_pad.T.astype(np.float64).tolist()   # (pad_to, emb_dim)
+        self._b_sub   = b_sub.astype(np.float64).tolist()
 
-        # Pre-slice W1_T_share into n blocks, one per source embedding
-        W1_arr = W1_T_share if isinstance(W1_T_share, np.ndarray) else np.array(W1_T_share)
-        self._W1_T_share_blocks = [
-            W1_arr[j * self.emb_dim : (j + 1) * self.emb_dim].tolist()
-            for j in range(self.n)
-        ]
-        self._b1_share = b1_share.tolist() if hasattr(b1_share, "tolist") else b1_share
+        # Sub-model second linear (embed)
+        W_embed = self.sub.embed.weight.detach().numpy()   # (emb_dim, emb_dim)
+        b_embed = self.sub.embed.bias.detach().numpy()     # (emb_dim,)
+        self._W_embed_T = W_embed.T.astype(np.float64).tolist()  # (emb_dim, emb_dim)
+        self._b_embed   = b_embed.astype(np.float64).tolist()
 
-        W2_arr = W2_T_share if isinstance(W2_T_share, np.ndarray) else np.array(W2_T_share)
-        self._W2_T_share = W2_arr.tolist()
-        self._b2_share   = b2_share.tolist() if hasattr(b2_share, "tolist") else b2_share
+        # Top-model column slice for this hospital
+        W_arr        = np.array(W_top_i, dtype=np.float64)  # (1, emb_dim)
+        self._W_top_T = W_arr.T.astype(np.float64).tolist() # (emb_dim, 1)
+        self._b_top   = b_top.astype(np.float64).tolist() if b_top is not None else None
 
         self._he_built = True
 
     def compute_sub_emb_he(self, enc_xi_bytes: bytes, ctx) -> bytes:
-        """CKKS sub-model: enc(features_i) -> enc(emb_i).
+        """CKKS sub-model: enc(features_i) → enc(embedding_i).
 
-        Receives only this hospital's feature slice (size |fg_i|) from the watch.
-        No zero-padding: W_sub_T maps (|fg_i|,) -> (emb_dim,) directly.
-        PolyAct applied in ciphertext space (-1 HE level).
+        Linear → CubicAct → Linear  (-2 HE levels total)
+
+        CubicAct: 0.197*z + 0.004*z³ = z * (0.197 + 0.004*z²)
+          step 1: z² = z*z          (-1 level)
+          step 2: z*(0.197+0.004*z²) (-1 level; TenSEAL auto-modswitch z to z²'s level)
         """
         import tenseal as ts
-        assert self._he_built, "call build_he_weights() after training"
+        assert self._he_built, "call build_he_weights() after loading model"
 
-        enc_h = ts.lazy_ckks_vector_from(enc_xi_bytes)
-        enc_h.link_context(ctx)
-        enc_h.mm_(self._W_sub_T)    # (|fg_i|,) -> (emb_dim,)
-        enc_h += self._b_sub
-        enc_act = enc_h * (enc_h + 0.5)   # PolyAct (-1 HE level)
+        enc_z = ts.lazy_ckks_vector_from(enc_xi_bytes)
+        enc_z.link_context(ctx)
+        enc_z.mm_(self._W_sub_T)
+        enc_z += self._b_sub
+
+        # Cubic activation: z * (0.197 + 0.004 * z²)
+        enc_z2  = enc_z * enc_z                       # -1 HE level
+        enc_act = enc_z * (enc_z2 * 0.004 + 0.197)   # -1 HE level
+
+        enc_act.mm_(self._W_embed_T)
+        enc_act += self._b_embed
         return enc_act.serialize()
 
-    def compute_h_share_he(self, enc_emb_dict: dict, ctx) -> bytes:
-        """Apply own W1_share to all enc(emb_j) and sum -> enc(h_share_i).
+    def compute_logit_share_he(self, enc_emb_bytes: bytes, ctx) -> bytes:
+        """Apply this hospital's W_top column slice to enc(embedding_i) → enc(logit_i).
 
-        enc_emb_dict: {hospital_id: enc_emb_bytes}  (one emb_dim ciphertext each)
-
-        For each source hospital j:
-          contribution_j = enc(emb_j) @ W1_T_share_blocks[j]  (emb_dim -> top_hidden)
-        enc(h_share_i) = sum_j(contribution_j) + b1_share_i
-
-        Summing across all hospitals i:
-          sum_i enc(h_share_i) = enc(concat @ W1.T + b1) = enc(h_linear)  ✓
-        No party ever holds or sees enc(concat) as a single ciphertext.
+        No bias added here — coordinator adds b_top once after summing all enc(logit_i).
         """
         import tenseal as ts
         assert self._he_built
 
-        enc_h = None
-        for j in range(self.n):
-            enc_emb_j = ts.lazy_ckks_vector_from(enc_emb_dict[j])
-            enc_emb_j.link_context(ctx)
-            contrib = enc_emb_j.mm_(self._W1_T_share_blocks[j])
-            enc_h = contrib if enc_h is None else enc_h + contrib
-
-        enc_h += self._b1_share
-        return enc_h.serialize()
-
-    def compute_logit_share_he(self, enc_h_act_bytes: bytes, ctx) -> bytes:
-        """Apply own W2_share + b2_share to enc(h_act) -> enc(logit_share_i).
-
-        Coordinator broadcasts enc(h_act) after PolyAct; each hospital applies
-        its additive share of W2. Summing across hospitals gives enc(logit).
-        """
-        import tenseal as ts
-        assert self._he_built
-
-        enc_logit = ts.lazy_ckks_vector_from(enc_h_act_bytes)
+        enc_logit = ts.lazy_ckks_vector_from(enc_emb_bytes)
         enc_logit.link_context(ctx)
-        enc_logit.mm_(self._W2_T_share)
-        enc_logit += self._b2_share
+        enc_logit.mm_(self._W_top_T)
         return enc_logit.serialize()
 
     def run_he_inference(
         self,
-        all_enc_xi: dict,           # {hospital_id: enc_xi_bytes} — each hospital's partial features
+        all_enc_xi: dict,           # {hospital_id: enc_xi_bytes}
         ctx,
         other_hospitals: list,      # list[HospitalModel]
     ) -> bytes:
-        """Fully distributed CKKS inference. Any hospital can be the entry point.
+        """Fully distributed CKKS inference (simulation — all hospitals in one process).
 
-        Protocol (no party ever sees plaintext features, embeddings, or logit):
-
-        1. Sub-model: each hospital independently decodes enc(features_i) with
-           its private sub-model -> enc(emb_i).  Each party sees only its own
-           encrypted feature slice from the watch.
-
-        2. Embedding exchange: hospitals broadcast enc(emb_i) to each other.
-           All parties now hold {enc(emb_j) for all j}, all as ciphertexts.
-
-        3. Top Linear1 (W1 additive share): each hospital i computes
-             enc(h_share_i) = sum_j( enc(emb_j) @ W1_T_share_i[j*d:(j+1)*d] ) + b1_share_i
-           Coordinator collects and sums -> enc(h_linear) = enc(concat @ W1 + b1).
-
-        4. PolyAct: coordinator applies h*(h+0.5) to enc(h_linear) in CKKS
-           (-1 HE level).  Coordinator sees only ciphertext.
-
-        5. Top Linear2 (W2 additive share): each hospital i computes
-             enc(logit_share_i) = enc(h_act) @ W2_T_share_i + b2_share_i
-           Coordinator sums -> enc(logit).
-
-        6. Return enc(logit) to patient who decrypts with secret key.
+        Protocol:
+          1. Each hospital: enc(features_i) → sub_model → enc(emb_i) → W_top_i → enc(logit_i)
+          2. Coordinator (self) sums all enc(logit_i) + b_top
+          3. Return enc(logit) — patient decrypts and applies sigmoid
         """
         import tenseal as ts
         assert self._he_built
 
         all_hospitals = sorted([self] + other_hospitals, key=lambda h: h.id)
 
-        # ── Step 1: each hospital computes enc(emb_i) ─────────────────────────
-        enc_emb_dict = {}
-        for h in all_hospitals:
-            enc_emb_dict[h.id] = h.compute_sub_emb_he(all_enc_xi[h.id], ctx)
-
-        # ── Step 2+3: each hospital applies W1_share; coordinator sums ────────
-        enc_h = None
-        for h in all_hospitals:
-            enc_h_i = ts.lazy_ckks_vector_from(h.compute_h_share_he(enc_emb_dict, ctx))
-            enc_h_i.link_context(ctx)
-            enc_h = enc_h_i if enc_h is None else enc_h + enc_h_i
-
-        # ── Step 4: PolyAct by coordinator — cross-hospital feature interaction ─
-        # Consistent with training: Linear1 → PolyAct → Linear2 → logit.
-        # Coordinator sees only ciphertext; nothing is revealed.
-        enc_h_act       = enc_h * (enc_h + 0.5)   # -1 HE level
-        enc_h_act_bytes = enc_h_act.serialize()
-
-        # ── Step 5: each hospital applies W2_share; coordinator sums → enc_logit
         enc_logit = None
         for h in all_hospitals:
-            enc_logit_i = ts.lazy_ckks_vector_from(h.compute_logit_share_he(enc_h_act_bytes, ctx))
-            enc_logit_i.link_context(ctx)
-            enc_logit = enc_logit_i if enc_logit is None else enc_logit + enc_logit_i
+            enc_emb = h.compute_sub_emb_he(all_enc_xi[h.id], ctx)
+            enc_l   = ts.lazy_ckks_vector_from(h.compute_logit_share_he(enc_emb, ctx))
+            enc_l.link_context(ctx)
+            enc_logit = enc_l if enc_logit is None else enc_logit + enc_l
 
-        # Return enc_logit. Patient decrypts and applies sigmoid locally.
-        # sigmoid is NOT applied here in CKKS — consistent with training's
-        # BCEWithLogitsLoss which also applies sigmoid outside the model output.
+        if self._b_top is not None:
+            enc_logit += self._b_top
+
         return enc_logit.serialize()
 
     @staticmethod
@@ -300,11 +230,7 @@ class HospitalModel(nn.Module):
 
     @staticmethod
     def decrypt_result(enc_bytes: bytes, ctx) -> float:
-        """Patient decrypts enc_logit → sigmoid → probability.
-
-        The model returns a raw logit (same as training's BCEWithLogitsLoss).
-        sigmoid is applied here on the patient device, not in CKKS.
-        """
+        """Patient decrypts enc_logit → sigmoid → probability."""
         import tenseal as ts
         import numpy as np
         vec = ts.lazy_ckks_vector_from(enc_bytes)
