@@ -22,12 +22,16 @@ from model import VerticalHeartNet
 
 
 def build_he_context() -> ts.Context:
-    # Level budget: sub-model CubicAct z*(0.197+0.004z²) (-2) + linear top-model (-0) = 2 levels consumed
-    # [60,40,40,40,40,40,60] provides 5 usable levels -> 3 remain after inference.
+    # Level budget per hospital:
+    #   mm_(W_sub)  -1  mm_(W_embed)  -1  mm_(W_top)  -1  = 3 linear levels
+    #   CubicAct: z*z -1, then enc_z (level L) * enc_z2 (level L-1)
+    #             → TenSEAL mod-switches enc_z down first (-1 extra) + multiply (-1) = -2 extra
+    #   Total: 3 + 2 = 5 levels needed; add 2 extra primes as headroom → 7 usable 40-bit levels
+    # [60,40,40,40,40,40,40,40,60] max bits = 400 < CoeffModulus::MaxBitCount(16384)=438 ✓
     ctx = ts.context(
         ts.SCHEME_TYPE.CKKS,
         poly_modulus_degree=16384,
-        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 60],
+        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 40, 40, 60],
     )
     ctx.global_scale = 2 ** 40
     ctx.generate_galois_keys()

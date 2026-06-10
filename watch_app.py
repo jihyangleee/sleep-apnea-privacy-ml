@@ -40,7 +40,7 @@ def _build_context():
     ctx = ts.context(
         ts.SCHEME_TYPE.CKKS,
         poly_modulus_degree=16384,
-        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 60],
+        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 40, 40, 60],
     )
     ctx.global_scale = 2 ** 40
     ctx.generate_galois_keys()
@@ -205,7 +205,7 @@ async def predict(
 
     try:
         # ── Phase 2: 각 병원에 직접 병렬 요청 (코디네이터 없음) ──────────────
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             resps = await asyncio.gather(*[
                 client.post(
                     f"{HOSPITAL_URLS[i]}/compute_logit_share",
