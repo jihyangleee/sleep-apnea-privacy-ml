@@ -29,38 +29,6 @@ class ClientSubModel(nn.Module):
         return self.embed(self.act(self.linear(x)))
 
 
-class ServerTopModel(nn.Module):
-    """Vertical FL top-model: concatenated embeddings → logit.
-
-    Single linear layer (no hidden, no activation).
-    Column-wise split lets each hospital compute its own partial logit
-    from its own embedding without any inter-hospital communication:
-      logit = Σ_i (emb_i @ W_top_i.T) + b
-    """
-    def __init__(self, total_emb_dim: int):
-        super().__init__()
-        self.linear = nn.Linear(total_emb_dim, 1)
-
-    def forward(self, x):
-        return self.linear(x)
-
-
-class VerticalHeartNet(nn.Module):
-    """Full Vertical FL model for HE inference — sub-models + top-model combined."""
-    def __init__(self, feature_groups: list, emb_dim: int = 16):
-        super().__init__()
-        self.feature_groups = [list(fg) for fg in feature_groups]
-        self.emb_dim        = emb_dim
-        self.sub_models     = nn.ModuleList([
-            ClientSubModel(len(fg), emb_dim) for fg in self.feature_groups
-        ])
-        self.top_model = ServerTopModel(emb_dim * len(self.feature_groups))
-
-    def forward(self, x):
-        embs = [sub(x[:, fg]) for sub, fg in zip(self.sub_models, self.feature_groups)]
-        return self.top_model(torch.cat(embs, dim=1))
-
-
 class HospitalModel(nn.Module):
     """Per-hospital model: private sub-model + shared column slice of top-model.
 

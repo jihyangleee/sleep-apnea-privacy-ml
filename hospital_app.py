@@ -13,21 +13,16 @@ Or trigger training via POST /train after starting the servers.
 
 import os
 import base64
-import asyncio
 import threading
-from typing import Dict
 from contextlib import asynccontextmanager
 
-import numpy as np
 import torch
 import torch.nn as nn
 import tenseal as ts
-import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 
 from schemas import (
     LogitShareRequest, LogitShareResponse,
-    InferRequest, InferResponse,
     TrainResponse,
 )
 from model import HospitalModel
@@ -38,13 +33,6 @@ from simulate import SLEEP_FEATURE_GROUPS, run_distributed_simulation
 
 HOSPITAL_ID = int(os.environ.get("HOSPITAL_ID", "0"))
 MODEL_PATH  = os.environ.get("MODEL_PATH", "vertical_model.pt")
-N_HOSPITALS = 3
-
-PEER_URLS: Dict[int, str] = {
-    0: os.environ.get("HOSPITAL_A_URL", "http://localhost:8001"),
-    1: os.environ.get("HOSPITAL_B_URL", "http://localhost:8002"),
-    2: os.environ.get("HOSPITAL_C_URL", "http://localhost:8003"),
-}
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -138,70 +126,6 @@ async def compute_logit_share(req: LogitShareRequest):
     )
 
 
-# ── Watch-facing coordinator endpoint ────────────────────────────────────────
-
-@app.post("/infer", response_model=InferResponse)
-async def infer(req: InferRequest):
-    """Single-round distributed HE inference — this hospital acts as coordinator.
-
-    Watch sends each hospital's feature slice (encrypted with its own key).
-    One HTTP round: each peer returns enc(logit_i) directly.
-    Coordinator sums all enc(logit_i) + b_top and returns enc(logit) to Watch.
-
-    Privacy: each peer hospital receives only its own enc(features_i).
-             No plaintext or embedding is ever revealed.
-    """
-    _require_model()
-
-    ctx = he_ctx
-    if req.he_ctx_b64:
-        ctx = ts.context_from(base64.b64decode(req.he_ctx_b64))
-
-    peer_ids = [i for i in range(N_HOSPITALS) if i != HOSPITAL_ID]
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            # Single round: each peer computes enc(logit_i) from its feature slice
-            logit_resps = await asyncio.gather(*[
-                client.post(
-                    f"{PEER_URLS[pid]}/compute_logit_share",
-                    json={
-                        "enc_xi_b64":  req.enc_xi_b64[str(pid)],
-                        "he_ctx_b64":  req.he_ctx_b64,
-                    },
-                )
-                for pid in peer_ids
-            ])
-            for pid, r in zip(peer_ids, logit_resps):
-                if r.status_code != 200:
-                    raise HTTPException(502, f"Hospital {pid} /compute_logit_share failed: {r.text}")
-
-        # Coordinator computes its own enc(logit_i)
-        own_enc_xi  = base64.b64decode(req.enc_xi_b64[str(HOSPITAL_ID)])
-        own_enc_emb = hospital.compute_sub_emb_he(own_enc_xi, ctx)
-        enc_logit   = ts.lazy_ckks_vector_from(hospital.compute_logit_share_he(own_enc_emb, ctx))
-        enc_logit.link_context(ctx)
-
-        # Sum all peer logit shares
-        for r in logit_resps:
-            enc_l = ts.lazy_ckks_vector_from(base64.b64decode(r.json()["enc_logit_share_b64"]))
-            enc_l.link_context(ctx)
-            enc_logit = enc_logit + enc_l
-
-        # Hospital 0 adds b_top: if we ARE hospital 0, our own share (computed via
-        # method) has no b_top yet, so add it here.
-        # If we are NOT hospital 0, b_top is already inside hospital 0's peer response.
-        if HOSPITAL_ID == 0 and hospital._b_top is not None:
-            enc_logit += hospital._b_top
-
-        return InferResponse(enc_logit_b64=base64.b64encode(enc_logit.serialize()).decode())
-
-    except HTTPException:
-        raise
-    except (httpx.ConnectError, httpx.RemoteProtocolError, OSError) as e:
-        raise HTTPException(502, f"병원 서버 연결 실패 — 모든 서버가 실행 중인지 확인하세요: {e}")
-
-
 # ── Training endpoint ─────────────────────────────────────────────────────────
 
 def _run_training(csv_path=None, dreamt_dir=None, dp_sigma=0.01, n_epochs=30):
@@ -254,5 +178,4 @@ async def health():
         "hospital_id":  HOSPITAL_ID,
         "model_loaded": hospital is not None,
         "model_path":   MODEL_PATH,
-        "peer_urls":    PEER_URLS,
     }

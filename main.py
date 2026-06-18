@@ -7,35 +7,16 @@ import tenseal as ts
 from sklearn.preprocessing import StandardScaler
 
 from dataset import generate_galaxy_watch_users
-from simulate import run_vertical_simulation, run_distributed_simulation, SLEEP_FEATURE_GROUPS
+from simulate import run_distributed_simulation, SLEEP_FEATURE_GROUPS
 from he_client import build_he_context
-from model import VerticalHeartNet, HospitalModel
+from model import HospitalModel
 
 MODEL_PATH = "vertical_model.pt"
 
 ENTRY_LABELS = ["Hospital A", "Hospital B", "Hospital C"]
 
 
-# ── Old vertical FL (SS, semi-honest server) ─────────────────────────────────
-
-def run_vertical_fl(csv_path: str = None, dreamt_dir: str = None):
-    """Vertical FL 학습 후 모델 + 스케일러 저장 (semi-honest server 가정)."""
-    model, scaler = run_vertical_simulation(csv_path, dreamt_dir, n_epochs=30)
-    torch.save(
-        {
-            "mode":             "vertical",
-            "model_state_dict": model.state_dict(),
-            "feature_groups":   model.feature_groups,
-            "emb_dim":          model.emb_dim,
-            "scaler_mean":      scaler.mean_.tolist(),
-            "scaler_scale":     scaler.scale_.tolist(),
-        },
-        MODEL_PATH,
-    )
-    print(f"[Vertical FL] model saved -> {MODEL_PATH}")
-
-
-# ── New distributed FL (SS + DP noise, linear top-model) ─────────────────────
+# ── Distributed FL (SS + DP noise, linear top-model) ──────────────────────────
 
 def run_distributed_fl(
     csv_path: str = None,
@@ -74,35 +55,20 @@ def _load_hospitals_for_he(ckpt: dict):
     emb_dim        = ckpt["emb_dim"]
     total_emb      = emb_dim * len(feature_groups)
 
-    if ckpt.get("mode") == "distributed":
-        shared_W = nn.Linear(total_emb, 1)
-        shared_W.load_state_dict(ckpt["top_W"])
+    shared_W = nn.Linear(total_emb, 1)
+    shared_W.load_state_dict(ckpt["top_W"])
 
-        hospitals = [
-            HospitalModel(i, feature_groups, emb_dim, shared_W)
-            for i in range(len(feature_groups))
-        ]
-        for i, h in enumerate(hospitals):
-            h.sub.load_state_dict(ckpt[f"sub_{i}"])
-    else:
-        # Legacy vertical checkpoint: wrap VerticalHeartNet into HospitalModel
-        legacy = VerticalHeartNet(feature_groups, emb_dim)
-        legacy.load_state_dict(ckpt["model_state_dict"])
-
-        shared_W = nn.Linear(total_emb, 1)
-        shared_W.load_state_dict(legacy.top_model.linear.state_dict())
-
-        hospitals = [
-            HospitalModel(i, feature_groups, emb_dim, shared_W)
-            for i in range(len(feature_groups))
-        ]
-        for i, h in enumerate(hospitals):
-            h.sub.load_state_dict(legacy.sub_models[i].state_dict())
+    hospitals = [
+        HospitalModel(i, feature_groups, emb_dim, shared_W)
+        for i in range(len(feature_groups))
+    ]
+    for i, h in enumerate(hospitals):
+        h.sub.load_state_dict(ckpt[f"sub_{i}"])
 
     for h in hospitals:
         h.eval()
 
-    # Each hospital holds its own column slice; coordinator adds b_top once
+    # Each hospital holds its own column slice; bias is added once when summed
     W_top = shared_W.weight.detach().numpy()   # (1, total_emb)
     b_top = shared_W.bias.detach().numpy()     # (1,)
     for i, h in enumerate(hospitals):
@@ -129,7 +95,7 @@ def run_he_infer():
     Privacy: patient data never decrypted at any hospital.
     """
     ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
-    mode = ckpt.get("mode", "vertical")
+    mode = ckpt.get("mode", "distributed")
     print(f"\n[HE Inference] checkpoint mode: {mode}")
 
     hospitals = _load_hospitals_for_he(ckpt)
@@ -187,10 +153,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["vertical", "distributed", "he-infer"],
+        choices=["distributed", "he-infer"],
         required=True,
         help=(
-            "vertical    : 기존 Vertical FL (semi-honest server)\n"
             "distributed : SS + DP noise, 단일 linear top-model\n"
             "he-infer    : HE 암호화 추론 데모"
         ),
@@ -205,9 +170,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.mode == "vertical":
-        run_vertical_fl(args.csv, args.dreamt)
-    elif args.mode == "distributed":
+    if args.mode == "distributed":
         run_distributed_fl(args.csv, args.dreamt, dp_sigma=args.dp_sigma)
     elif args.mode == "he-infer":
         run_he_infer()

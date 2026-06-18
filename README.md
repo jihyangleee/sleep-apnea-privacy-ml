@@ -11,8 +11,7 @@
 
 본 프로젝트는 수직 분할 학습(Vertical Federated Learning, VFL) 환경에서 환자의 프라이버시를
 완벽하게 보장하며 수면 무호흡증을 예측하는 다층 방어 아키텍처를 가진다. 전체 파이프라인은
-마스킹 단계를 제외하고 다음과 같이 **학습(Training)**과 **추론(Inference)** 과정으로 나누어
-진행된다.
+다음과 같이 **학습(Training)**과 **추론(Inference)** 과정으로 나누어 진행된다.
 
 ---
 
@@ -92,21 +91,25 @@ enc_features = Encrypt(watch_features, pk_patient)
 enc_embedding_A = apply_submodel_A_encrypted(enc_features)
 ```
 
-**단계 3. 암호화 상태의 탑 모델 결합**
-- 각 병원의 서브모델이 출력한 암호화된 임베딩들을 한데 모아 탑 모델의 가중치를 행렬 곱
-  연산으로 결합하여 하나의 암호화된 최종 로짓(`enc_logit`)을 생성한다. 동형암호의 특성 덕분에
-  암호화된 상태 그대로 결합 연산이 완료된다.
+**단계 3. 암호화 상태의 부분 로짓 계산 (코디네이터 없음)**
+- 각 병원은 자신이 출력한 암호화된 임베딩에 `W_top`의 자기 컬럼 슬라이스만 곱해 부분
+  로짓(`enc_logit_i`)을 만든다. 병원 간 통신이나 중개하는 코디네이터 없이, 각 병원이 결과를
+  환자 디바이스로 직접 반환한다.
 
 ```
-enc_logit = enc_embedding_A · W_top_A + enc_embedding_B · W_top_B + enc_embedding_C · W_top_C
+enc_logit_A = enc_embedding_A · W_top_A
+enc_logit_B = enc_embedding_B · W_top_B
+enc_logit_C = enc_embedding_C · W_top_C        (+ b_top, 병원 A만 가산)
 ```
 
-**단계 4. 환자 복호화 및 최종 예측**
-- 최종 연산된 암호문 결과(`enc_logit`)를 환자의 디바이스로 안전하게 반환한다.
-- 환자는 오직 자신만 보유하고 있는 개인 비밀키(`sk_patient`)로 복호화를 수행한 후, 시그모이드
-  함수를 적용하여 최종 수면 무호흡증 위험도 확률(0~1 사이의 값)을 최종 확인한다.
+**단계 4. 환자 측 합산·복호화 및 최종 예측**
+- 환자(Watch) 디바이스가 세 병원으로부터 받은 `enc_logit_A, enc_logit_B, enc_logit_C`를
+  암호문 상태에서 직접 더한다(HE 덧셈은 평문 변환 없이 가능).
+- 오직 환자만 보유한 개인 비밀키(`sk_patient`)로 합산된 결과를 복호화한 후, 시그모이드 함수를
+  적용하여 최종 수면 무호흡증 위험도 확률(0~1 사이의 값)을 확인한다.
 
 ```
+enc_logit   = enc_logit_A + enc_logit_B + enc_logit_C
 logit_final = Decrypt(enc_logit, sk_patient)
 risk_score  = sigmoid(logit_final)
 ```
@@ -121,7 +124,7 @@ risk_score  = sigmoid(logit_final)
 | 보호 대상 | **임베딩 데이터** (3-way 덧셈 비밀분할 + Laplace DP noise) | **환자 raw feature** (CKKS 암호화) |
 | 모델 가중치 | 학습 중 탑/서브 모델 동시 역전파 업데이트 | 고정된 평문 상수로 취급, 암호문과 곱해짐 |
 | 비선형 처리 | Beaver Triple로 보호된 share 상태에서 다항식 근사 시그모이드 적용 | ciphertext 그대로 다항식 근사 ReLU 적용 (-2 HE 레벨) |
-| 결합 연산 | 각 병원이 share를 concat 후 `W_top`과 선형 결합 (통신 불필요) | 각 병원의 enc(embedding)에 `W_top` 행렬곱 후 합산 |
+| 결합 연산 | 각 병원이 share를 concat 후 `W_top`과 선형 결합 (통신 불필요) | 각 병원의 enc(embedding)에 `W_top` 컬럼 슬라이스 곱 → 환자가 직접 합산 (코디네이터 없음) |
 | 최종 출력 | 탑 모델 결합 → 시그모이드 → BCE Loss | 환자 기기에서 decrypt → 시그모이드 → 위험도 확률 |
 | 키 보유 | 해당 없음 (비밀분할로 격리) | 환자만 CKKS 비밀키(`sk_patient`) 보유 |
 
@@ -165,7 +168,7 @@ W_top_B = W_top.weight[:, 16:32]     # 병원 B 보유
 W_top_C = W_top.weight[:, 32:48]     # 병원 C 보유
 
 enc_logit_i = enc_embedding_i @ W_top_i.T          (ciphertext × plaintext, -1 HE 레벨)
-enc_logit   = Σ_i enc_logit_i + b_top              ← coordinator가 합산 후 1회만 더함
+enc_logit   = Σ_i enc_logit_i + b_top              ← 환자(client)가 직접 합산, b_top은 1회만 가산
 ```
 
 - 어떤 병원도 `W_top` 전체를 복원할 필요가 없다 — 자기 컬럼 슬라이스만으로 충분하다.
@@ -230,18 +233,14 @@ enc_logit   = Σ_i enc_logit_i + b_top              ← coordinator가 합산 �
 
 ```
 ├── dataset.py         데이터 로드 (SHHS / DREAMT / 합성)
-├── model.py           HospitalModel (학습+추론 통합), ServerTopModel, PolyActivation
+├── model.py           ClientSubModel, PolyActivation, HospitalModel (학습+추론 통합)
 ├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider
-├── simulate.py        run_distributed_simulation (신규), run_vertical_simulation (레거시)
-├── he_client.py       build_he_context, HospitalHE, HEInference (benchmark 호환)
+├── simulate.py        run_distributed_simulation (SS + DP noise, 분산 학습)
+├── he_client.py       build_he_context (환자·병원 공유 CKKS 컨텍스트)
 ├── hospital_app.py    FastAPI 병원 서버 (병원별 독립 실행)
-├── watch_app.py       Galaxy Watch 역할 웹 클라이언트 (다른 컴퓨터에서 실행)
-├── client_gui.py      Galaxy Watch 역할 데스크톱 GUI 클라이언트 (Tkinter)
+├── client_gui.py      Galaxy Watch 역할 데스크톱 GUI 클라이언트 (Tkinter, 코디네이터 없음)
 ├── schemas.py         FastAPI Pydantic 요청/응답 모델
-├── client.py          VerticalClient (레거시 학습)
-├── server.py          VerticalFLServer (레거시 학습)
-├── benchmark.py       HE vs 평문 / SS overhead 벤치마크
-└── main.py            진입점 (--mode vertical / distributed / he-infer)
+└── main.py            진입점 (--mode distributed / he-infer)
 ```
 
 ---
@@ -266,33 +265,37 @@ python main.py --mode distributed --dreamt physionet.org/files/dreamt/2.1.0
 
 # DP noise 조절 (기본 0.01, 0이면 비활성화)
 python main.py --mode distributed --dp-sigma 0.005
-
-# 레거시 학습 (semi-honest server 단일 코디네이터)
-python main.py --mode vertical
 ```
 
-### Watch 클라이언트 웹앱 (다른 컴퓨터에서 실행)
+### Watch 클라이언트 (Tkinter 데스크톱 GUI, 코디네이터 없음)
+
+병원 서버와는 별개의 컴퓨터(환자/Galaxy Watch 역할)에서 실행한다 — secret key를 가진 유일한 주체이므로
+병원 서버와 같은 머신에 두면 안 된다.
 
 ```bash
 # Watch 컴퓨터에서
-COORDINATOR_URL=http://<병원서버IP>:8001 uvicorn watch_app:app --host 0.0.0.0 --port 9000
+pip install requests tenseal
+python client_gui.py
 ```
 
-브라우저에서 `http://localhost:9000` 접속 → 수치 입력 → 암호화 후 예측 요청
+`client_gui.py` 상단의 `HOSPITAL_URLS`를 병원 서버가 실행 중인 컴퓨터의 IP:포트로 맞춘 뒤 실행한다.
+GUI에서 값 입력 → "Generate CKKS Keys" → "Encrypt & Preview" → "Send to Hospitals" 순서로 클릭하면 끝.
 
 ```
-[Watch 컴퓨터 :9000]               [병원 컴퓨터]
-  feature 입력 폼                   :8001  hospital_app
-  CKKS 암호화 (secret key 보유)     :8002  hospital_app
-  POST /infer ──────────────────▶   :8003  hospital_app
-  enc_logit 수신
-  복호화 → 확률 표시
+[client_gui.py]                              [병원 컴퓨터]
+  feature 입력
+  CKKS 키 생성 (secret key 보유)
+  POST /compute_logit_share ───────────────▶  :8001  hospital_A
+  POST /compute_logit_share ───────────────▶  :8002  hospital_B
+  POST /compute_logit_share ───────────────▶  :8003  hospital_C
+  (3개 enc_logit_share 수신)
+  HE 덧셈으로 합산 → 복호화 → sigmoid → 위험도 표시
 ```
 
 ### FastAPI 서버 (병원별 독립 실행)
 
 ```bash
-pip install fastapi uvicorn httpx
+pip install fastapi uvicorn
 
 # 터미널 3개에서 각각 실행
 HOSPITAL_ID=0 uvicorn hospital_app:app --port 8001
@@ -304,22 +307,12 @@ HOSPITAL_ID=2 uvicorn hospital_app:app --port 8003
 # 체크포인트 없을 때 — 서버 실행 후 학습 트리거
 curl -X POST http://localhost:8001/train
 
-# Galaxy Watch 추론 요청 (coordinator 병원 선택)
-# Watch: POST /infer with {enc_xi_b64: {"0": ..., "1": ..., "2": ...}}
-# 응답: {enc_logit_b64: "..."} → Watch가 복호화 → 수면무호흡 확률
+# 추론은 코디네이터 없이 환자(client_gui)가 병원 3곳에 각각 직접 요청한다
+# (흐름은 위 "Watch 클라이언트" 섹션 참고)
+# POST /compute_logit_share  {enc_xi_b64, he_ctx_b64} → {enc_logit_share_b64}
 
 # 헬스 체크
 curl http://localhost:8001/health
-```
-
-**추론 내부 흐름 (3라운드 병원간 HTTP):**
-```
-Watch → POST /infer (coordinator)
-  Round 1: coordinator → 각 병원 /compute_emb   (enc_xi → enc_emb)
-  Round 2: coordinator → 각 병원 /compute_h_share (enc_emb_all → enc_h_share)
-           coordinator: Σenc_h_share → PolyAct → enc_h_act
-  Round 3: coordinator → 각 병원 /compute_logit_share (enc_h_act → enc_logit_share)
-           coordinator: Σenc_logit_share = enc_logit → Watch
 ```
 
 ### HE 추론 데모 (시뮬레이션)
@@ -334,10 +327,4 @@ python main.py --mode he-infer
 Profile 0: 젊은 남성 (정상)
   Plaintext prob  : 0.2341
   HE prob         : 0.2342  |err|=0.000134  (entry=Hospital B)
-```
-
-### 벤치마크
-
-```bash
-python benchmark.py --n-infer 10 --n-plain 500 --n-batches 30
 ```
