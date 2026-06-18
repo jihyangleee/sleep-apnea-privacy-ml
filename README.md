@@ -2,96 +2,99 @@
 
 수면 무호흡증 예측을 위한 **Vertical Federated Learning + 동형암호화(CKKS) 추론** 시스템.
 
-3개 병원이 원시 데이터를 공유하지 않고 협력 학습하고,
-환자 기기(Galaxy Watch)는 기능을 암호화한 채로 예측 결과를 받는다.
+3개 병원이 원시 데이터를 공유하지 않고 협력 학습하며, 환자 기기(Galaxy Watch)는
+모든 추론 과정에서 데이터를 암호화한 채로 예측 결과만 받는다.
 
 ---
 
-## 학습 — Vertical FL + Additive SS + DP Noise
+## 시스템 아키텍처 및 파이프라인 (Architecture & Pipeline)
 
-```
-병원 A (SpO₂, avg HR)       병원 B (수면지표 3개)        병원 C (나이, 성별, BMI)
-      │ sub_model_A                 │ sub_model_B                 │ sub_model_C
-      │ Linear → PolyAct            │ Linear → PolyAct            │ Linear → PolyAct
-      ↓ emb_A                       ↓ emb_B                       ↓ emb_C
-      │
-      ├─── additive split + DP noise ──────────────────────────────────┐
-      │                                                                 │
-      │  병원 j 수신: concat_share_j = [share_A_j, share_B_j, share_C_j]  │
-      │  h_share_j = concat_share_j @ W_top1 + b1/n   ← SS 선형 분산  │
-      │                                                                 │
-      │  [랜덤 coordinator 선정]                                        │
-      │  h_linear = Σ h_share_j     ← 평문으로 봄 (semi-honest)       │
-      │  h_act    = PolyAct(h_linear)   ← 병원 간 피처 상호작용       │
-      │  logit    = h_act @ W_top2                                      │
-      │  loss     = BCEWithLogitsLoss(logit, y)                        │
-      └─────────────────────────────────────────────────────────────────┘
-
-  ** Beaver Triple (PolyAct 적용)
-  각 party j:  e_j = h_share_j - a_j  →  broadcast
-               f_j = h_share_j - b_j  →  broadcast
-  공개값:      e = h_linear - a  (a를 모르면 h_linear 복원 불가)
-               f = h_linear - b
-  결과:        act_share_j = c_j + f*a_j + e*b_j + [j=0]*e*f
-               Σ act_share_j = PolyAct(h_linear)  ← h_linear 비공개 상태
-
-  [Backward]
-  coordinator → d_loss/d_logit (BCELoss gradient)
-             → d_loss/d_act_share_j 브로드캐스트
-  병원 j     → d_loss/d_W_top2 += act_share_j.T @ d_loss
-             → d_loss/d_W_top1, d_loss/d_emb_i 역전파
-  (시뮬레이션에서는 PyTorch autograd가 위 흐름을 자동 계산)
-
-  ** Gradient DP noise (label 보호)
-  d_loss/d_emb_i 가 bottom model로 흐르기 전에 Gaussian noise 주입.
-  gradient의 부호/크기에서 label을 역추론하는 공격을 차단.
-  (embedding 전송 시 DP noise와 동일한 sigma 사용)
-
-프라이버시 메커니즘
-  - Additive SS       : 개별 share는 정보이론적으로 랜덤 → 원본 embedding 복원 불가
-  - DP noise (forward): 전송 전 Gaussian noise 주입 → 통계적 추론 차단
-  - DP noise (backward): gradient에 Gaussian noise 주입 → label 역추론 차단
-  - Beaver Triple     : h_linear 평문 재구성 없이 PolyAct 계산 → h_linear 비공개
-  - Rotating coord    : 매 배치마다 logit 합산 coordinator 랜덤 선정 → 신뢰 분산
-  - 노출 최소화       : coordinator가 보는 건 h_linear(32d) 아닌 logit(스칼라)뿐
-```
+본 프로젝트는 수직 분할 학습(Vertical Federated Learning, VFL) 환경에서 환자의 프라이버시를
+완벽하게 보장하며 수면 무호흡증을 예측하는 다층 방어 아키텍처를 가진다. 전체 파이프라인은
+마스킹 단계를 제외하고 다음과 같이 **학습(Training)**과 **추론(Inference)** 과정으로 나누어
+진행된다.
 
 ---
 
-## 추론 — CKKS 동형암호 + W_top Additive Share
+### 1. 학습 과정 (Training Process)
 
-```
-                     [Galaxy Watch / 환자 기기]  (CKKS 비밀키 보유)
-                                    │
-         ┌──────────────────────────┼──────────────────────────┐
-         │ enc([f0,f1])             │ enc([f2,f3,f4])          │ enc([f5,f6,f7])
-         ↓                          ↓                           ↓
-     병원 A                      병원 B                      병원 C
-  sub_model_A (CKKS)          sub_model_B (CKKS)          sub_model_C (CKKS)
-  Linear → PolyAct_CKKS       Linear → PolyAct_CKKS       Linear → PolyAct_CKKS
-         │ enc(emb_A)                │ enc(emb_B)                 │ enc(emb_C)
-         └──────────── enc(emb) 교환 (ciphertext, 복호화 불가) ───┘
-                                    │
-     각 병원 i:  enc(h_share_i) = Σⱼ enc(emb_j) @ W_top1_share_i[j]  + b1_share_i
-                                    │
-     [랜덤 coordinator]  enc(h_linear) = Σ enc(h_share_i)
-                                    │
-                    PolyAct_CKKS(enc(h_linear))   ← -1 HE 레벨
-                                    │
-     각 병원 i:  enc(logit_share_i) = enc(h_act) @ W_top2_share_i + b2_share_i
-                                    │
-     coordinator: enc(logit) = Σ enc(logit_share_i)
-                                    │
-                     [Galaxy Watch / 환자 기기]
-                     sigmoid(decrypt(enc(logit))) → 수면무호흡 확률
+학습 단계에서는 **평문(Plaintext) 도메인**에서 로컬 연산을 수행하되, 병원 간 데이터 전송 시
+**차분 프라이버시(DP)**와 **덧셈 비밀분할(Additive Secret Sharing)**을 결합하여 가중치를
+안전하게 동시 업데이트한다.
 
-프라이버시 메커니즘
-  - 환자 feature  : 병원별 slice만 암호화 전송, 다른 병원 feature 접근 불가
-  - enc(emb)      : ciphertext 교환, 어떤 병원도 복호화 불가
-  - W_top1, W_top2: 추론 시 additive share 분산 보유, 누구도 전체 가중치 미보유
-  - PolyAct       : 암호화 상태로 연산, coordinator도 h_linear 평문 미열람
-  - 최종 logit    : 환자 기기만 복호화 가능
-```
+**단계 1. 평문 도메인에서의 로컬 임베딩 계산**
+- 각 병원(A, B, C)은 스마트워치에서 수집된 환자의 생체 데이터(HR, SpO2, 수면 시간)를 입력받아
+  로컬 GPU에서 독립적으로 임베딩을 계산한다.
+- 특징 추출 백본인 **LKCNN + 1DSE + BiGRU** 구조를 통과하며, 암호화 도메인 호환성을 위해
+  비선형 활성화 함수는 **3차 다항식 근사 ReLU**를 적용한다.
+
+$$f(x) = 0.197x + 0.004x^3$$
+
+**단계 2. 차분 프라이버시(DP) 노이즈 추가**
+- 병원 간 공모 공격 및 통계적 역추적 추론을 방어하기 위해, 추출된 로컬 임베딩 벡터에
+  라플라스 노이즈($Laplace(0, \Delta / \varepsilon)$)를 선제적으로 주입한다.
+
+**단계 3. 덧셈 비밀분할 (Additive Secret Sharing)**
+- 노이즈가 섞인 임베딩 벡터를 수학적으로 3등분하여 조각(Share)으로 쪼갠다.
+
+$$\text{embedding}_A = \text{share}_{A1} + \text{share}_{A2} + \text{share}_{A3}$$
+
+- 각 병원은 자신의 조각을 다른 병원들과 교환하여, 어떤 단일 병원도 다른 병원의 원본 임베딩
+  분포를 알 수 없도록 격리한다.
+  - **병원 A 보유 조각:** ($\text{share}_{A1}, \text{share}_{B1}, \text{share}_{C1}$)
+  - **병원 B 보유 조각:** ($\text{share}_{A2}, \text{share}_{B2}, \text{share}_{C2}$)
+  - **병원 C 보유 조각:** ($\text{share}_{A3}, \text{share}_{B3}, \text{share}_{C3}$)
+
+**단계 4. 분할 탑 모델 선형 결합 (Split Top Model)**
+- 각 병원은 수집한 조각들을 결합(Concat)한 후, 탑 모델의 가중치 행렬과 곱하는 선형 연산을
+  수행한다. 이 과정은 순수 선형 결합이므로 병원 간 별도의 통신이 발생하지 않는다.
+
+$$\text{logit\_share}_A = \text{concat}([\text{share}_{A1}, \text{share}_{B1}, \text{share}_{C1}]) \cdot W_{\text{top\_model}} + b_{\text{top\_model}}$$
+
+**단계 5. 최종 오차 산출 및 역전파 (Beaver Triples)**
+- 비밀분할 상태에서 안전하게 오차를 계산하기 위해 **Beaver Triples** 알고리즘을 도입하여
+  곱셈 연산을 수행한다.
+- 최종 예측 확률값은 **3차 다항식 근사 시그모이드(Sigmoid)** 함수를 거쳐 산출되며, 계산된
+  손실(Loss)을 바탕으로 탑 모델과 서브 모델의 가중치를 동시에 역전파하여 업데이트한다.
+
+$$\sigma(x) \approx 0.5 + 0.197x - 0.004x^3$$
+
+---
+
+### 2. 추론 과정 (Inference Process)
+
+추론 단계에서는 환자의 데이터 기밀성을 극대화하기 위해 **CKKS 동형암호(Homomorphic
+Encryption)**를 사용한다. 학습된 모델 가중치($W, b$)는 고정된 평문 상수로 사용되며, 환자의
+데이터는 전 과정에서 암호화된 상태로 연산된다.
+
+**단계 1. 환자 디바이스 도메인 암호화**
+- 환자의 스마트워치에서 수집된 생체 데이터는 외부로 전송되기 전, 환자 본인의 디바이스에서
+  자체 공개키(`pk_patient`)를 사용하여 CKKS 암호문 상태로 변환된다.
+
+$$\text{enc\_features} = \text{Encrypt}(\text{watch\_features}, \text{pk\_patient})$$
+
+**단계 2. 암호화 상태의 서브모델 연산**
+- 암호화된 데이터(`enc_features`)가 각 병원으로 전달되면, 병원들은 앞서 학습이 완료된 고정
+  가중치를 상수 플레인텍스트로 취급하여 암호문과 곱해주는 선형 연산을 수행한다. 이 과정에서
+  환자의 평문 데이터는 병원에 절대 노출되지 않는다.
+
+$$\text{enc\_embedding}_A = \text{apply\_submodel\_A\_encrypted}(\text{enc\_features})$$
+
+**단계 3. 암호화 상태의 탑 모델 결합**
+- 각 병원의 서브모델이 출력한 암호화된 임베딩들을 한데 모아 탑 모델의 가중치를 행렬 곱
+  연산으로 결합하여 하나의 암호화된 최종 로짓(`enc_logit`)을 생성한다. 동형암호의 특성 덕분에
+  암호화된 상태 그대로 결합 연산이 완료된다.
+
+$$\text{enc\_logit} = \text{enc\_embedding}_A \cdot W_{\text{top\_A}} + \text{enc\_embedding}_B \cdot W_{\text{top\_B}} + \text{enc\_embedding}_C \cdot W_{\text{top\_C}}$$
+
+**단계 4. 환자 복호화 및 최종 예측**
+- 최종 연산된 암호문 결과(`enc_logit`)를 환자의 디바이스로 안전하게 반환한다.
+- 환자는 오직 자신만 보유하고 있는 개인 비밀키(`sk_patient`)로 복호화를 수행한 후, 시그모이드
+  함수를 적용하여 최종 수면 무호흡증 위험도 확률(0~1 사이의 값)을 최종 확인한다.
+
+$$\text{logit\_final} = \text{Decrypt}(\text{enc\_logit}, \text{sk\_patient})$$
+
+$$\text{risk\_score} = \text{sigmoid}(\text{logit\_final})$$
 
 ---
 
@@ -99,11 +102,13 @@
 
 | | 학습 | 추론 |
 |---|---|---|
-| SS 대상 | **데이터** (embedding additive split) | **모델 가중치** (W_top additive split) |
-| 이유 | 평문 share는 선형 연산에서 분산 가능 | ciphertext는 분할 불가; 같은 enc에 weight share 적용 |
-| 비선형 (PolyAct) | coordinator가 h_linear 보고 적용 | CKKS 다항식 — ciphertext 상태 그대로 |
-| coordinator | 랜덤 선정, h_linear 평문 노출 | 랜덤 선정, ciphertext만 봄 |
-| 최종 sigmoid | BCEWithLogitsLoss 내부 적용 | 환자 기기에서 decrypt 후 적용 |
+| 연산 도메인 | 평문 (로컬 GPU) | CKKS 암호문 |
+| 보호 대상 | **임베딩 데이터** (3-way 덧셈 비밀분할 + Laplace DP noise) | **환자 raw feature** (CKKS 암호화) |
+| 모델 가중치 | 학습 중 탑/서브 모델 동시 역전파 업데이트 | 고정된 평문 상수로 취급, 암호문과 곱해짐 |
+| 비선형 처리 | Beaver Triple로 보호된 share 상태에서 다항식 근사 시그모이드 적용 | ciphertext 그대로 다항식 근사 ReLU 적용 (-2 HE 레벨) |
+| 결합 연산 | 각 병원이 share를 concat 후 $W_{top}$과 선형 결합 (통신 불필요) | 각 병원의 enc(embedding)에 $W_{top}$ 행렬곱 후 합산 |
+| 최종 출력 | 탑 모델 결합 → 시그모이드 → BCE Loss | 환자 기기에서 decrypt → 시그모이드 → 위험도 확률 |
+| 키 보유 | 해당 없음 (비밀분할로 격리) | 환자만 CKKS 비밀키(`sk_patient`) 보유 |
 
 ---
 
@@ -111,32 +116,64 @@
 
 ### Sub-model (병원별 private)
 ```
-Linear(|feature_i| → emb_dim) → PolyAct
+LKCNN + 1DSE + BiGRU → 3차 다항식 근사 ReLU (PolyAct)
 ```
 각 병원의 feature만 처리. 다른 병원과 공유되지 않음.
 
 ### Top-model (병원 간 공유, 동일 가중치)
-```
-Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
-```
-- Linear1: SS로 분산 계산 (각 병원이 자기 share에 적용, 합산)
-- PolyAct: 병원 간 cross-feature 비선형 상호작용 학습
-- Linear2: 추론 시 additive share로 분산
 
-### PolyAct: `f(x) = x * (x + 0.5) = x² + 0.5x`
+```
+W_top : Linear(total_emb_dim → 1)     # total_emb_dim = emb_dim × 3 (기본 16×3=48)
+b_top : (1,)
+```
+
+학습 시 3개 병원 모두 **동일한 `W_top`, `b_top` 파라미터**를 공유하며 동시에 역전파한다.
+순수 선형이라 비밀분할(SS)된 share 위에서 곧바로 분산 계산이 가능하다.
+
+```
+concat_share_j = [share_A_j, share_B_j, share_C_j]            (batch, 3·emb_dim)
+logit_share_j  = concat_share_j @ W_top.weight.T + (b_top  if j==0 else 0)
+logit          = Σ_j logit_share_j
+               = (Σ_j concat_share_j) @ W_top.weight.T + b_top
+               = concat(emb_A, emb_B, emb_C) @ W_top.weight.T + b_top      ← 선형성으로 등호 성립
+```
+
+- `Σ_j share_j = emb` 이므로 share에 먼저 곱하고 나중에 더해도 결과가 같다 → **곱셈이 끼지 않아 Beaver Triple이 필요 없다** (`model.py: HospitalModel.logit_share`).
+- 바이어스 중복 합산을 막기 위해 `j==0`인 병원만 `b_top`을 더한다 (`is_first` 플래그).
+- 곱셈(비선형)이 필요한 곳은 로짓을 합산한 **이후의 시그모이드 근사 단계뿐**이며, 거기서만 Beaver Triple 2회(`x²`, `x³`)가 들어간다 (`secret_sharing.py: BeaverProvider.sigmoid_approx`).
+
+추론(CKKS) 시에는 같은 `W_top`을 **컬럼 단위로 슬라이스**해서 각 병원이 자기 임베딩에 대응하는 부분만 들고 있는다 (`model.py: HospitalModel.build_he_weights`):
+
+```
+W_top_A = W_top.weight[:, 0:16]      # 병원 A 보유 — 자기 emb_A 컬럼만
+W_top_B = W_top.weight[:, 16:32]     # 병원 B 보유
+W_top_C = W_top.weight[:, 32:48]     # 병원 C 보유
+
+enc_logit_i = enc_embedding_i @ W_top_i.T          (ciphertext × plaintext, -1 HE 레벨)
+enc_logit   = Σ_i enc_logit_i + b_top              ← coordinator가 합산 후 1회만 더함
+```
+
+- 어떤 병원도 `W_top` 전체를 복원할 필요가 없다 — 자기 컬럼 슬라이스만으로 충분하다.
+- 이 곱셈 1회가 CKKS 파라미터 표의 "sub-model 선형 3" 중 마지막 1단계에 해당한다.
+
+### PolyAct: `f(x) = 0.197x + 0.004x³`
 - CKKS 동형암호 호환 (다항식)
-- 인수분해 형태 → ciphertext 곱셈 1회 (-1 HE 레벨)
-- ReLU / sigmoid 대신 사용
+- `x * (0.197 + 0.004*x²)` 형태로 인수분해 → ciphertext 곱셈 2회 (-2 HE 레벨)
+- ReLU 대신 사용
+
+### Sigmoid 근사: `σ(x) ≈ 0.5 + 0.197x - 0.004x³`
+- 학습 시 Beaver Triple 2회(x², x³)로 비밀분할 상태에서 계산
+- BCELoss 입력 직전에 적용되어 어떤 병원도 평문 로짓을 보지 않음
 
 ### CKKS 파라미터
 | 파라미터 | 값 |
 |---|---|
 | `poly_modulus_degree` | 16384 |
-| `coeff_mod_bit_sizes` | [60, 40, 40, 40, 40, 40, 60] |
+| `coeff_mod_bit_sizes` | [60, 40×7, 60] |
 | `global_scale` | 2⁴⁰ |
-| 가용 곱셈 레벨 | 5 |
-| 소비 레벨 | 2 (sub-model + top-model PolyAct) |
-| 남은 레벨 | 3 |
+| 가용 곱셈 레벨 | 7 |
+| 소비 레벨 | 5 (sub-model 선형 3 + CubicAct 2) |
+| 남은 레벨 | 2 (헤드룸) |
 
 ---
 
@@ -165,15 +202,12 @@ Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
 
 | 항목 | 학습 | 추론 |
 |---|---|---|
-| 환자 raw feature | - | 병원별 encrypted slice만 전달 ✅ |
-| embedding 노출 | SS + DP noise (forward) ✅ | ciphertext 교환 ✅ |
-| label → gradient 역추론 | DP noise (backward) ✅ | 해당 없음 |
-| h_linear 노출 | Beaver Triple → 아무도 평문 미열람 ✅ | ciphertext, 누구도 복호화 불가 ✅ |
-| 모델 가중치 W_top | 병원들이 동일 보유 | additive share 분산 보유 ✅ |
-| 최종 logit | coordinator 스칼라 봄 ⚠️ | 환자만 복호화 ✅ |
-
-> ⚠️ 학습 단계 한계: `h_linear`(32d)는 Beaver Triple로 보호되나,
-> coordinator가 최종 `logit`(스칼라 1개)을 평문으로 봄. loss 계산에 필수적인 한계.
+| 환자 raw feature | - | 환자 디바이스에서 CKKS 암호화 후 전송 |
+| 임베딩 노출 | 3-way 덧셈 비밀분할 + Laplace DP noise | ciphertext 상태로만 교환 |
+| 병원 간 공모 / 통계적 역추적 | DP noise로 차단 | ciphertext이므로 해당 없음 |
+| 로짓(logit) 노출 | Beaver Triple → 아무도 평문 미열람 | ciphertext, 환자만 복호화 가능 |
+| 모델 가중치 $W, b$ | 병원들이 동일 가중치 보유, 공동 역전파 | 고정 평문 상수로 사용 (가중치 자체는 비밀 아님) |
+| 최종 예측 확률 | BCE Loss 계산용으로 share 합산 후 노출 | 환자 디바이스에서만 decrypt + sigmoid |
 
 ---
 
@@ -187,6 +221,7 @@ Linear1(total_emb → 32) → PolyAct → Linear2(32 → 1) → logit
 ├── he_client.py       build_he_context, HospitalHE, HEInference (benchmark 호환)
 ├── hospital_app.py    FastAPI 병원 서버 (병원별 독립 실행)
 ├── watch_app.py       Galaxy Watch 역할 웹 클라이언트 (다른 컴퓨터에서 실행)
+├── client_gui.py      Galaxy Watch 역할 데스크톱 GUI 클라이언트 (Tkinter)
 ├── schemas.py         FastAPI Pydantic 요청/응답 모델
 ├── client.py          VerticalClient (레거시 학습)
 ├── server.py          VerticalFLServer (레거시 학습)
