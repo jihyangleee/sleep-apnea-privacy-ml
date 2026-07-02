@@ -33,6 +33,7 @@ from simulate import SLEEP_FEATURE_GROUPS, run_distributed_simulation
 
 HOSPITAL_ID = int(os.environ.get("HOSPITAL_ID", "0"))
 MODEL_PATH  = os.environ.get("MODEL_PATH", "vertical_model.pt")
+CSV_PATH    = os.environ.get("CSV_PATH") or None
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -157,7 +158,7 @@ async def train(background_tasks: BackgroundTasks):
     """Trigger distributed FL training. Saves checkpoint and reloads model."""
     if _train_lock.locked():
         return TrainResponse(status="running", message="Training already in progress.")
-    background_tasks.add_task(_run_training)
+    background_tasks.add_task(_run_training, csv_path=CSV_PATH)
     return TrainResponse(status="started", message="Training started in background. GET /health to check.")
 
 

@@ -8,7 +8,7 @@ Hospitals hold only the public key and model weights.
 import tenseal as ts
 
 
-def build_he_context() -> ts.Context:
+def build_he_context() -> ts.Context: 
     # Level budget per hospital:
     #   mm_(W_sub)  -1  mm_(W_embed)  -1  mm_(W_top)  -1  = 3 linear levels
     #   CubicAct: z*z -1, then enc_z (level L) * enc_z2 (level L-1)

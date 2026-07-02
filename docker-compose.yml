@@ -1,0 +1,48 @@
+services:
+  hospital_0:
+    build: .
+    environment:
+      - HOSPITAL_ID=0
+      - MODEL_PATH=/shared/vertical_model.pt
+      - CSV_PATH=/data/shhs1-dataset-0.21.0.csv
+    ports:
+      - "8001:8000"
+    volumes:
+      - model_data:/shared
+      - ./shhs/datasets:/data:ro
+    networks:
+      - hospital_net
+
+  hospital_1:
+    build: .
+    environment:
+      - HOSPITAL_ID=1
+      - MODEL_PATH=/shared/vertical_model.pt
+      - CSV_PATH=/data/shhs1-dataset-0.21.0.csv
+    ports:
+      - "8002:8000"
+    volumes:
+      - model_data:/shared
+      - ./shhs/datasets:/data:ro
+    networks:
+      - hospital_net
+
+  hospital_2:
+    build: .
+    environment:
+      - HOSPITAL_ID=2
+      - MODEL_PATH=/shared/vertical_model.pt
+      - CSV_PATH=/data/shhs1-dataset-0.21.0.csv
+    ports:
+      - "8003:8000"
+    volumes:
+      - model_data:/shared
+      - ./shhs/datasets:/data:ro
+    networks:
+      - hospital_net
+
+volumes:
+  model_data:
+
+networks:
+  hospital_net:

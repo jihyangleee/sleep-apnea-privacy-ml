@@ -7,15 +7,17 @@ from sklearn.model_selection import train_test_split
 
 # NSRR SHHS-1 변수명 — 실제 CSV 컬럼명과 다를 경우 여기서만 수정
 SHHS_FEATURES = [
-    "avgsao2",    # SpO2: 평균 산소포화도 (%)
-    "avg_hr",    # avg heart rate: 평균 심박수
-    "slptime",   # total sleep time: 총 수면 시간 (분)
-    "slp_eff",  # sleep efficiency: 수면 효율 (%)
-    "timest34p",  # deep sleep ratio: 3-4단계 수면 비율 (%)
-    "age_s1",    # age
-    "gender",    # sex: 1=남, 2=여
-    "bmi_s1",    # BMI
+    "avgsat",     # SpO2: 평균 산소포화도 (%) — CSV: avgsat
+    "avg_hr",     # avg heart rate: 평균 심박수 — CSV에 없음, load 시 4개 컬럼 평균으로 계산
+    "slpprdp",    # total sleep time: 총 수면 시간 (분) — CSV: slpprdp
+    "slpeffp",    # sleep efficiency: 수면 효율 (%) — CSV: slpeffp
+    "times34p",   # deep sleep ratio: 3-4단계 수면 비율 (%) — CSV: times34p
+    "age_s1",     # age
+    "gender",     # sex: 1=남, 2=여
+    "bmi_s1",     # BMI
 ]
+# CSV에서 avg_hr을 계산할 때 사용하는 4개 컬럼 (NREM/REM × 앙와위/비앙와위)
+_SHHS_HR_COLS = ["savbnbh", "savbnoh", "savbrbh", "savbroh"]
 SHHS_LABEL    = "ahi_a0h3a"
 AHI_THRESHOLD = 15  # 중등도 이상 수면무호흡
 
@@ -27,7 +29,8 @@ def explore_shhs_csv(csv_path: str):
     for i, col in enumerate(df.columns):
         print(f"  {i:3d}  {col}")
     print("\n=== SHHS_FEATURES 매핑 검증 ===")
-    for name in SHHS_FEATURES + [SHHS_LABEL]:
+    check_cols = [c for c in SHHS_FEATURES if c != "avg_hr"] + _SHHS_HR_COLS + [SHHS_LABEL]
+    for name in check_cols:
         status = "✅" if name in df.columns else "❌ 없음 — 컬럼명 확인 필요"
         print(f"  {name:<15} {status}")
 
@@ -39,9 +42,11 @@ def load_shhs_data(csv_path: str, return_scaler: bool = False):
     y — (n_samples,)   float32, 0=정상 / 1=수면무호흡(AHI≥15)
     return_scaler=True 시 (X, y, scaler) 반환
     """
-    df = pd.read_csv(csv_path, usecols=SHHS_FEATURES + [SHHS_LABEL])
+    csv_cols = [c for c in SHHS_FEATURES if c != "avg_hr"] + _SHHS_HR_COLS + [SHHS_LABEL]
+    df = pd.read_csv(csv_path, usecols=csv_cols)
+    df["avg_hr"] = df[_SHHS_HR_COLS].mean(axis=1)
     df = df[df[SHHS_LABEL] >= 0]
-    df = df[df["slp_eff"] > 0]
+    df = df[df["slpeffp"] > 0]
     df = df.dropna()
 
     X = df[SHHS_FEATURES].values.astype(np.float32)

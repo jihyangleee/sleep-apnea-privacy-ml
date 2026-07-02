@@ -25,7 +25,7 @@ HOSPITAL_URLS = [
     "http://10.50.41.170:8002",
     "http://10.50.41.170:8003",
 ]
-
+# galaxy watch 에서 요청하는 부분 - client 파트 
 # 병원별 feature 슬라이스 인덱스 (simulate.py의 SLEEP_FEATURE_GROUPS와 동일)
 # SHHS feature 순서: spo2, avg_hr, slptime, slp_eff, timest34p, age, sex, bmi
 FEATURE_GROUPS = [[0, 1], [2, 3, 4], [5, 6, 7]]
