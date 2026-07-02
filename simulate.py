@@ -11,8 +11,6 @@ from secret_sharing import additive_split, apply_dp_noise, BeaverProvider
 
 NUM_CLIENTS = 3
 
-# Feature partition by inspection panel (index into SHHS_FEATURES)
-# SHHS_FEATURES = [avgsao2, avg_hr, slptime, slp_eff, timest34p, age_s1, gender, bmi_s1]
 SLEEP_FEATURE_GROUPS = [
     [0, 1],      # client A — 심박·산소 모니터링: SpO2(avgsao2), avg HR(avg_hr)
     [2, 3, 4],   # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio
