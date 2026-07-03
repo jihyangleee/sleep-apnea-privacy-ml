@@ -1,5 +1,20 @@
+"""
+Client(Galaxy Watch)
+
+Phase 1 : CKKS Key Generation
+Phase 2 : Feature Encryption
+Phase 3 : Direct Inference (Client → All Hospitals)
+Phase 4 : Entry-point Inference (Client → Entry Hospital → Peer Hospitals)
+
+최종 복호화는 Secret Key를 가진 Client에서만 수행한다.
+병원은 암호문 상태에서만 연산하며 평문 데이터는 확인할 수 없다.
+"""
+
+# 임의 파일 - client , galaxy watch
 import base64
 import math
+import threading
+import time                                            # client-hospital / 병원간 통신 시간 측정
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -19,35 +34,43 @@ else:
     IMPORT_ERROR = None
 
 
-SERVER_URL = "http://10.50.41.170:8001/infer"
-
-# DEMO ONLY: 교수님 시연용으로 secret key preview를 화면에 표시한다.
-# 실제 서비스/논문 구현에서는 반드시 False로 바꿔야 한다.
-DEMO_SHOW_SECRET_KEY = True
-
-FEATURES = [
-    ("SpO2 (%)", "spo2", 95.0),
-    ("Avg heart rate", "avg_hr", 72.0),
-    ("Sleep efficiency (0~1)", "sleep_eff", 0.86),
-    ("Deep sleep ratio (0~1)", "deep_sleep_ratio", 0.21),
-    ("Total sleep time (min)", "total_sleep_time", 410.0),
-    ("Age", "age", 24.0),
-    ("Sex (male=1, female=0)", "sex", 1.0),
-    ("BMI", "bmi", 23.0),
+# ── 병원 서버 주소 (각 병원에 직접 연결) ─────────────────────────────────────
+HOSPITAL_URLS = [
+    "http://172.24.7.163:8001",
+    "http://172.24.7.163:8002",
+    "http://172.24.7.163:8003",
 ]
+# galaxy watch 에서 요청하는 부분 - client 파트
+# 병원별 feature 슬라이스 인덱스 (simulate.py의 SLEEP_FEATURE_GROUPS와 동일)
+# SHHS feature 순서: spo2, avg_hr, slptime, slp_eff, timest34p, age, sex, bmi
+FEATURE_GROUPS = [[0, 1], [2, 3, 4], [5, 6, 7]]
+
+# GUI 입력 필드 (SHHS feature 순서에 맞춤)
+FEATURES = [
+    ("SpO2 (%)",                "spo2",       95.0),
+    ("Avg heart rate (bpm)",    "avg_hr",     72.0),
+    ("Total sleep time (min)",  "slptime",   420.0),
+    ("Sleep efficiency (0~1)",  "slp_eff",    0.85),
+    ("Deep sleep ratio (0~1)",  "timest34p",  0.20),
+    ("Age",                     "age",        50.0),
+    ("Sex (male=1, female=0)",  "sex",         1.0),
+    ("BMI",                     "bmi",        25.0),
+]
+
+DEMO_SHOW_SECRET_KEY = True
 
 
 def normalize(values):
-    spo2, avg_hr, sleep_eff, deep_ratio, sleep_min, age, sex, bmi = values
+    spo2, avg_hr, slptime, slp_eff, timest34p, age, sex, bmi = values
     return [
-        (spo2 - 95.0) / 3.0,
-        (avg_hr - 70.0) / 15.0,
-        (sleep_eff - 0.85) / 0.10,
-        (deep_ratio - 0.20) / 0.10,
-        (sleep_min - 420.0) / 90.0,
-        (age - 50.0) / 15.0,
+        (spo2     - 95.0)  /  3.0,
+        (avg_hr   - 70.0)  / 15.0,
+        (slptime  - 420.0) / 90.0,
+        (slp_eff  -  0.85) /  0.10,
+        (timest34p - 0.20) /  0.10,
+        (age      - 50.0)  / 15.0,
         sex,
-        (bmi - 25.0) / 5.0,
+        (bmi      - 25.0)  /  5.0,
     ]
 
 
@@ -55,40 +78,39 @@ def sigmoid(x):
     return 1.0 / (1.0 + math.exp(-x))
 
 
+def _next_pow2(n):
+    p = 1
+    while p < n:
+        p <<= 1
+    return max(p, 4)
+
+
 class SecureHealthClient(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Secure Health HE Client Prototype")
-        self.geometry("780x860")
+        self.title("Secure Health HE Client")
+        self.geometry("780x1150")
         self.resizable(False, False)
 
-        self.entries = {}
-        self.context = None
-        self.last_payload = None
-        self.last_encrypted_features_b64 = None
+        self.entries        = {}
+        self.context        = None
+        self.normalized     = None
+        self._busy          = False
+        self.entry_choice   = tk.StringVar(value="Hospital 0")
 
-        title = tk.Label(
-            self,
-            text="Encrypted Sleep-Apnea Inference Client",
-            font=("Arial", 15, "bold"),
-        )
+        title = tk.Label(self, text="Encrypted Sleep-Apnea Inference Client",
+                         font=("Arial", 15, "bold"))
         title.pack(pady=10)
 
         if ts is None:
-            tk.Label(
-                self,
-                text=f"TenSEAL import failed: {IMPORT_ERROR}",
-                fg="red",
-                wraplength=740,
-            ).pack(pady=5)
+            tk.Label(self, text=f"TenSEAL import failed: {IMPORT_ERROR}",
+                     fg="red", wraplength=740).pack(pady=5)
 
         form = tk.Frame(self)
         form.pack(pady=5)
-
         for i, (label, key, default) in enumerate(FEATURES):
             tk.Label(form, text=label, anchor="w", width=30).grid(
-                row=i, column=0, padx=6, pady=4
-            )
+                row=i, column=0, padx=6, pady=4)
             ent = tk.Entry(form, width=20)
             ent.insert(0, str(default))
             ent.grid(row=i, column=1, padx=6, pady=4)
@@ -97,342 +119,415 @@ class SecureHealthClient(tk.Tk):
         button_frame = tk.Frame(self)
         button_frame.pack(pady=8)
 
-        tk.Button(
-            button_frame,
-            text="Load Watch Data",
-            command=self.load_watch_data,
-            width=24,
-        ).grid(row=0, column=0, padx=5, pady=4)
+        tk.Button(button_frame, text="Load Watch Data",
+                  command=self.load_watch_data, width=24).grid(
+            row=0, column=0, padx=5, pady=4)
 
-        tk.Button(
-            button_frame,
-            text="1. Generate CKKS Keys",
-            command=self.generate_context,
-            width=24,
-        ).grid(row=0, column=1, padx=5, pady=4)
+        tk.Button(button_frame, text="1. Generate CKKS Keys",
+                  command=lambda: self._run_in_thread(self._generate_context_task), width=24).grid(
+            row=0, column=1, padx=5, pady=4)
 
-        tk.Button(
-            button_frame,
-            text="2. Encrypt & Show Ciphertext",
-            command=self.encrypt_and_show,
-            width=24,
-        ).grid(row=1, column=0, padx=5, pady=4)
+        tk.Button(button_frame, text="2. Encrypt & Preview",
+                  command=lambda: self._run_in_thread(self._encrypt_task), width=24).grid(
+            row=1, column=0, padx=5, pady=4)
 
-        tk.Button(
-            button_frame,
-            text="3. Send Encrypted Data",
-            command=self.send_encrypted_data,
-            width=24,
-        ).grid(row=1, column=1, padx=5, pady=4)
+        tk.Button(button_frame, text="3. Send to Hospitals (direct)",
+                  command=lambda: self._run_in_thread(self._send_task), width=24).grid(
+            row=1, column=1, padx=5, pady=4)
 
-        self.status = tk.Label(
-            self,
-            text="Status: ready",
-            anchor="w",
-            justify="left",
-            wraplength=740,
-        )
+        tk.Button(button_frame, text="4. Send via /infer (entry-point)",
+                  command=lambda: self._run_in_thread(self._send_infer_task), width=24).grid(
+            row=2, column=0, padx=5, pady=4)
+
+        entry_frame = tk.Frame(button_frame)
+        entry_frame.grid(row=2, column=1, padx=5, pady=4)
+        tk.Label(entry_frame, text="Entry-point hospital:").pack(side="left")
+        tk.OptionMenu(entry_frame, self.entry_choice,
+                      "Hospital 0", "Hospital 1", "Hospital 2").pack(side="left")
+
+        self.status = tk.Label(self, text="Status: ready", anchor="w",
+                               justify="left", wraplength=740)
         self.status.pack(pady=6)
 
-        self.result = tk.Label(
-            self,
-            text="",
-            font=("Arial", 13, "bold"),
-            wraplength=740,
-        )
+        self.result = tk.Label(self, text="", font=("Arial", 13, "bold"),
+                               wraplength=740)
         self.result.pack(pady=6)
 
-        tk.Label(
-            self,
-            text="CKKS Key Information",
-            font=("Arial", 11, "bold"),
-        ).pack(pady=(8, 2))
-
-        self.key_text = tk.Text(self, height=12, width=98)
+        tk.Label(self, text="CKKS Key Information",
+                 font=("Arial", 11, "bold")).pack(pady=(8, 2))
+        self.key_text = tk.Text(self, height=8, width=98)
         self.key_text.pack(pady=5)
 
-        tk.Label(
-            self,
-            text="Encrypted Feature Preview",
-            font=("Arial", 11, "bold"),
-        ).pack(pady=(8, 2))
-
-        self.encrypted_text = tk.Text(self, height=17, width=98)
+        tk.Label(self, text="Encrypted Feature Preview",
+                 font=("Arial", 11, "bold")).pack(pady=(8, 2))
+        self.encrypted_text = tk.Text(self, height=12, width=98)
         self.encrypted_text.pack(pady=5)
+
+        tk.Label(self, text="Timing Breakdown (client↔hospital / hospital↔hospital)",
+                 font=("Arial", 11, "bold")).pack(pady=(8, 2))
+        self.timing_text = tk.Text(self, height=10, width=98)
+        self.timing_text.pack(pady=5)
+
+    # ── 스레드 실행 헬퍼 ──────────────────────────────────────────────────────
+
+    def _run_in_thread(self, task):
+        if self._busy:
+            self._set_status("Status: 이전 작업이 진행 중입니다.")
+            return
+        self._busy = True
+        threading.Thread(target=self._task_wrapper, args=(task,), daemon=True).start()
+
+    def _task_wrapper(self, task):
+        try:
+            task()
+        except Exception as exc:
+            self.after(0, messagebox.showerror, "Error", str(exc))
+            self.after(0, self._set_status, f"Status: failed — {exc}")
+        finally:
+            self._busy = False
+
+    def _set_status(self, text):
+        self.after(0, self.status.config, {"text": text})
+
+    def _clear_timing(self):
+        self.after(0, self.timing_text.delete, "1.0", "end")
+
+    def _log_timing(self, text):
+        print(f"[timing] {text}")                      # 터미널에서도 바로 확인 가능하도록
+        self.after(0, self.timing_text.insert, "end", text + "\n")
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def read_values(self):
+        return [float(self.entries[key].get().strip()) for _, key, _ in FEATURES]
 
     def load_watch_data(self):
         if extract_features is None:
-            messagebox.showerror(
-                "Watch data error",
-                "feature_processor.py를 찾을 수 없습니다.",
-            )
+            messagebox.showerror("Watch data error", "feature_processor.py를 찾을 수 없습니다.")
             return
-
-        file_path = filedialog.askopenfilename(
+        path = filedialog.askopenfilename(
             title="Select watch data file",
-            filetypes=[
-                ("Watch data files", "*.csv *.json"),
-                ("CSV files", "*.csv"),
-                ("JSON files", "*.json"),
-                ("All files", "*.*"),
-            ],
-        )
-
-        if not file_path:
+            filetypes=[("Watch data files", "*.csv *.json"),
+                       ("All files", "*.*")])
+        if not path:
             return
-
         try:
-            features = extract_features(file_path)
-
+            feats = extract_features(path)
             mapping = {
-                "spo2": "spo2",
-                "avg_hr": "avg_hr",
-                "sleep_eff": "sleep_efficiency",
-                "deep_sleep_ratio": "deep_sleep_ratio",
-                "total_sleep_time": "total_sleep_time",
-                "age": "age",
-                "sex": "sex",
-                "bmi": "bmi",
+                "spo2":      "spo2",
+                "avg_hr":    "avg_hr",
+                "slptime":   "total_sleep_time",
+                "slp_eff":   "sleep_efficiency",
+                "timest34p": "deep_sleep_ratio",
+                "age":       "age",
+                "sex":       "sex",
+                "bmi":       "bmi",
             }
-
-            for entry_key, feature_key in mapping.items():
-                if feature_key in features:
-                    self.entries[entry_key].delete(0, "end")
-                    self.entries[entry_key].insert(0, str(features[feature_key]))
-
-            messagebox.showinfo("Success", "Watch data loaded successfully.")
-            self.status.config(text=f"Status: loaded watch data from {file_path}")
-
+            for gui_key, feat_key in mapping.items():
+                if feat_key in feats:
+                    self.entries[gui_key].delete(0, "end")
+                    self.entries[gui_key].insert(0, str(feats[feat_key]))
+            self.status.config(text=f"Status: loaded watch data from {path}")
         except Exception as e:
             messagebox.showerror("Watch data error", str(e))
 
-    def generate_context(self):
+    # ── Phase 1: 키 생성 (백그라운드) ────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Phase 1. CKKS 암호화 환경 생성
+        #
+        # - 클라이언트(사용자 단말)에서 CKKS Context를 생성한다.
+        # - Secret Key는 클라이언트에만 저장하며 외부로 전송하지 않는다.
+        # - Public Key, Galois Key, Relin Key를 포함한 Public Context만 병원에 전달한다.
+        # - 이후 모든 병원은 이 Public Context를 이용하여 복호화 없이 암호문 연산만 수행한다.
+        # ─────────────────────────────────────────────────────────────────────────────
+    def _generate_context_task(self):
         if ts is None:
-            messagebox.showerror(
-                "TenSEAL error",
-                f"TenSEAL is not installed/importable.\n{IMPORT_ERROR}",
-            )
+            self.after(0, messagebox.showerror, "TenSEAL error",
+                       f"TenSEAL not available.\n{IMPORT_ERROR}")
             return
 
+        self._set_status("Status: CKKS 키 생성 중... (수초 소요)")
+        
+        # CKKS Context 생성
         self.context = ts.context(
             ts.SCHEME_TYPE.CKKS,
-            poly_modulus_degree=8192,
-            coeff_mod_bit_sizes=[60, 40, 40, 60],
+            poly_modulus_degree=16384,
+            coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 40, 40, 60],
         )
-        self.context.global_scale = 2**40
-        self.context.generate_galois_keys()
-        self.context.generate_relin_keys()
+        self.context.global_scale = 2 ** 40
+        self.context.generate_galois_keys()     # 회전(Galois) 연산을 위한 Key 생성
+        self.context.generate_relin_keys()      # Ciphertext-Ciphertext 곱셈 후 재선형화를 위한 Key 생성
 
-        self.show_key_information()
+        pub_ctx = self.context.copy()           # Secret Key를 제거한 Public Context 생성
+        pub_ctx.make_context_public()
+        pub_b64 = base64.b64encode(
+            pub_ctx.serialize(save_public_key=True, save_secret_key=False,
+                              save_galois_keys=True, save_relin_keys=True)
+        ).decode()
 
-        self.status.config(
-            text="Status: CKKS context/key generated. Secret key is shown only because DEMO_SHOW_SECRET_KEY=True."
-        )
+        def update_ui():
+            self.key_text.delete("1.0", "end")
+            self.key_text.insert("end", "[CKKS Parameters]\n")
+            self.key_text.insert("end", "poly_modulus_degree : 16384\n")
+            self.key_text.insert("end", "coeff_mod_bit_sizes : [60,40,40,40,40,40,40,40,60]\n")
+            self.key_text.insert("end", "global_scale        : 2^40\n\n")
+            self.key_text.insert("end", f"[Public Context Preview]\n{pub_b64[:800]}...\n")
+            self.status.config(text="Status: CKKS context generated (poly_modulus_degree=16384).")
 
-    def show_key_information(self):
-        if self.context is None:
-            return
+        self.after(0, update_ui)
 
-        public_context = self.context.copy()
-        public_context.make_context_public()
-
-        public_bytes = public_context.serialize(
-            save_public_key=True,
-            save_secret_key=False,
-            save_galois_keys=True,
-            save_relin_keys=True,
-        )
-        public_b64 = base64.b64encode(public_bytes).decode("utf-8")
-
-        self.key_text.delete("1.0", "end")
-
-        self.key_text.insert("end", "[CKKS Encryption Information]\n\n")
-        self.key_text.insert("end", "Scheme: CKKS\n")
-        self.key_text.insert("end", "poly_modulus_degree: 8192\n")
-        self.key_text.insert("end", "coeff_mod_bit_sizes: [60, 40, 40, 60]\n")
-        self.key_text.insert("end", "global_scale: 2^40\n\n")
-
-        self.key_text.insert("end", "[Public Context / Public Evaluation Keys Preview]\n")
-        self.key_text.insert("end", public_b64[:1200] + "...\n")
-        self.key_text.insert("end", f"Public context length: {len(public_b64)} characters\n\n")
-
-        if DEMO_SHOW_SECRET_KEY:
-            try:
-                # TenSEAL 버전에 따라 secret_key().serialize()가 지원되지 않을 수 있다.
-                secret_bytes = self.context.secret_key().serialize()
-                secret_b64 = base64.b64encode(secret_bytes).decode("utf-8")
-
-                self.key_text.insert("end", "[DEMO ONLY - Secret Key Preview]\n")
-                self.key_text.insert("end", secret_b64[:1200] + "...\n")
-                self.key_text.insert("end", f"Secret key length: {len(secret_b64)} characters\n\n")
-            except Exception as exc:
-                self.key_text.insert("end", "[DEMO ONLY - Secret Key Preview]\n")
-                self.key_text.insert(
-                    "end",
-                    "Secret key serialization is not supported in this TenSEAL version.\n"
-                    f"Reason: {exc}\n\n",
-                )
-
-        self.key_text.insert("end", "[Security Policy]\n")
-        self.key_text.insert(
-            "end",
-            "Real deployment: secret key must stay only inside the client.\n",
-        )
-        self.key_text.insert(
-            "end",
-            "Demo mode: secret key preview is displayed only for explanation/verification.\n",
-        )
-        self.key_text.insert(
-            "end",
-            "Server receives public context + encrypted_features, not raw features.\n",
-        )
-
-    def read_values(self):
-        vals = []
-        for _, key, _ in FEATURES:
-            vals.append(float(self.entries[key].get().strip()))
-        return vals
-
-    def encrypt_and_show(self):
+    # ── Phase 2: 암호화 미리보기 (백그라운드) ────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Phase 2. 생체 데이터 암호화
+        #
+        # - 갤럭시 워치에서 추출한 생체 데이터를 읽는다.
+        # - 모델 입력 범위에 맞게 Feature를 정규화한다.
+        # - 병원별 Feature Group으로 분할한다.
+        # - 각 Feature Group을 CKKS 암호문으로 암호화한다.
+        # - 암호화된 결과는 병원으로 전송되기 전 미리보기 형태로 확인할 수 있다.
+        # ─────────────────────────────────────────────────────────────────────────────
+    def _encrypt_task(self):
         if ts is None:
-            messagebox.showerror(
-                "TenSEAL error",
-                f"TenSEAL is not installed/importable.\n{IMPORT_ERROR}",
-            )
+            self.after(0, messagebox.showerror, "TenSEAL error",
+                       f"TenSEAL not available.\n{IMPORT_ERROR}")
             return
-
         if self.context is None:
-            self.generate_context()
+            self._generate_context_task()
 
-        try:
-            raw = self.read_values()
-            normalized = normalize(raw)
+        self._set_status("Status: 암호화 중...")
+        
+        raw             = self.read_values()        # 입력 Feature 읽기
+        self.normalized = normalize(raw)            # Feature 정규화
 
-            enc_x = ts.ckks_vector(self.context, normalized)
+        lines = []
+        lines.append("[Plain Feature Vector]\n")
+        lines.append(str(raw) + "\n\n")
+        lines.append("[Normalized Feature Vector]\n")
+        lines.append(str(self.normalized) + "\n\n")
 
-            public_context = self.context.copy()
-            public_context.make_context_public()
+        # 병원별 Feature Group 생성
+        # 병원 i가 담당하는 Feature만 선택
+        # CKKS 암호화 수행        
+        for i, indices in enumerate(FEATURE_GROUPS):
+            x_slice  = [self.normalized[j] for j in indices]
+            pad      = _next_pow2(len(x_slice))
+            x_padded = x_slice + [0.0] * (pad - len(x_slice))
+            enc      = ts.ckks_vector(self.context, x_padded)
+            b64      = base64.b64encode(enc.serialize()).decode()
+            lines.append(f"[Hospital {i} — features {indices}]\n{b64[:300]}...\n\n")
 
-            context_b64 = base64.b64encode(
-                public_context.serialize(
-                    save_public_key=True,
-                    save_secret_key=False,
-                    save_galois_keys=True,
-                    save_relin_keys=True,
-                )
-            ).decode("utf-8")
-
-            encrypted_features_b64 = base64.b64encode(
-                enc_x.serialize()
-            ).decode("utf-8")
-
-            self.last_payload = {
-                "enc_xi_b64": {
-                        "A": encrypted_features_b64,
-                        "B": encrypted_features_b64,
-                        "C": encrypted_features_b64,
-                    },
-                "he_ctx_b64": context_b64,
-            }
-            self.last_encrypted_features_b64 = encrypted_features_b64
-
+        def update_ui():
             self.encrypted_text.delete("1.0", "end")
+            for line in lines:
+                self.encrypted_text.insert("end", line)
+            self.status.config(text="Status: features encrypted. (3 slices, one per hospital)")
 
-            self.encrypted_text.insert("end", "[Plain Feature Vector]\n")
-            self.encrypted_text.insert("end", str(raw) + "\n\n")
+        self.after(0, update_ui)
 
-            self.encrypted_text.insert("end", "[Normalized Feature Vector]\n")
-            self.encrypted_text.insert("end", str(normalized) + "\n\n")
-
-            self.encrypted_text.insert(
-                "end",
-                "[Encrypted Feature Ciphertext - Base64 Preview]\n",
-            )
-            self.encrypted_text.insert(
-                "end",
-                encrypted_features_b64[:1200] + "...\n\n",
-            )
-
-            self.encrypted_text.insert("end", "[Ciphertext Info]\n")
-            self.encrypted_text.insert(
-                "end",
-                f"Encrypted feature length: {len(encrypted_features_b64)} characters\n",
-            )
-            self.encrypted_text.insert(
-                "end",
-                f"Public context length: {len(context_b64)} characters\n\n",
-            )
-
-            self.encrypted_text.insert("end", "[Transmission Check]\n")
-            self.encrypted_text.insert(
-                "end",
-                "Payload contains: enc_xi_b64(A,B,C) + he_ctx_b64.\n",
-            )
-            self.encrypted_text.insert(
-                "end",
-                "Payload does NOT contain the raw feature vector.\n",
-            )
-            self.encrypted_text.insert(
-                "end",
-                "Payload does NOT contain the secret key.\n",
-            )
-
-            self.status.config(
-                text="Status: features encrypted successfully. Ciphertext preview is displayed below."
-            )
-
-        except Exception as exc:
-            messagebox.showerror("Encryption failed", str(exc))
-            self.status.config(text=f"Status: encryption failed - {exc}")
-
-    def send_encrypted_data(self):
-        if self.last_payload is None:
-            self.encrypt_and_show()
-
-        if self.last_payload is None:
+    # ── Phase 3: 각 병원에 직접 전송 → 합산 → 복호화 (client↔hospital만, 병원간 통신 없음) ───
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Phase 3. Direct Inference
+        #
+        # Client → Hospital 0
+        # Client → Hospital 1
+        # Client → Hospital 2
+        #
+        # - 클라이언트가 각 병원으로 직접 암호화된 Feature를 전송한다.
+        # - 각 병원은 자신의 Sub-model과 Top-model Weight Slice를 이용하여
+        #   암호화된 Logit Share를 계산한다.
+        # - 병원 간 통신은 수행하지 않는다.
+        # - 클라이언트가 모든 Logit Share를 합산하고 복호화하여 최종 Risk Score를 계산한다.
+        # ─────────────────────────────────────────────────────────────────────────────
+    def _send_task(self):
+        if ts is None:
+            self.after(0, messagebox.showerror, "TenSEAL error",
+                       f"TenSEAL not available.\n{IMPORT_ERROR}")
+            return
+        if self.context is None or self.normalized is None:
+            self._encrypt_task()
+        if self.normalized is None:
             return
 
+        pub_ctx = self.context.copy()
+        pub_ctx.make_context_public()
+        ctx_bytes = pub_ctx.serialize(
+            save_public_key=True, save_secret_key=False,
+            save_galois_keys=True, save_relin_keys=True,
+        )
+
+        self._clear_timing()
+        self._log_timing("=== Direct pattern (client -> each hospital) ===")
+
         try:
-            self.status.config(
-                text="Status: encrypted features sent to server. Server cannot decrypt raw features."
-            )
+            t_flow_start = time.perf_counter()
 
-            resp = requests.post(SERVER_URL, json=self.last_payload, timeout=30)
-            print("STATUS =", resp.status_code)
-            print("RESPONSE =", resp.text)
-            resp.raise_for_status()
+            # 컨텍스트를 각 병원에 먼저 업로드 — raw bytes multipart (JSON 불안정 문제 회피)
+            # Public Context를 모든 병원에 업로드
+            for i, url in enumerate(HOSPITAL_URLS):
+                self._set_status(f"Status: 병원 {i} 컨텍스트 업로드 중...")
+                t0 = time.perf_counter()
+                # 병원으로 암호문 전송
+                resp = requests.post(
+                    f"{url}/upload_context",
+                    data=ctx_bytes,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                self._log_timing(f"upload_context -> hospital {i}: {(time.perf_counter()-t0)*1000:.1f} ms")
 
-            encrypted_logit_b64 = resp.json()["enc_logit_b64"]
+            enc_logit = None
+            for i, (url, indices) in enumerate(zip(HOSPITAL_URLS, FEATURE_GROUPS)):
+                self._set_status(f"Status: 병원 {i} ({url}) 추론 요청 중...")
+                # 병원별 Feature Slice 암호화
+                x_slice  = [self.normalized[j] for j in indices]    
+                pad      = _next_pow2(len(x_slice))
+                x_padded = x_slice + [0.0] * (pad - len(x_slice))
+                enc_xi   = ts.ckks_vector(self.context, x_padded)
+                xi_b64   = base64.b64encode(enc_xi.serialize()).decode()
 
-            enc_logit = ts.ckks_vector_from(
-                self.context,
-                base64.b64decode(encrypted_logit_b64),
-            )
+                t0 = time.perf_counter()
+                resp = requests.post(
+                    f"{url}/compute_logit_share",
+                    json={"enc_xi_b64": xi_b64},
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                self._log_timing(f"compute_logit_share -> hospital {i}: {(time.perf_counter()-t0)*1000:.1f} ms  (client<->hospital)")
 
-            logit = enc_logit.decrypt()[0]
-            prob = sigmoid(logit)
+                enc_l = ts.ckks_vector_from(
+                    self.context,
+                    base64.b64decode(resp.json()["enc_logit_share_b64"]),
+                )
+                # 병원들의 Logit Share를 암호문 상태에서 합산
+                enc_logit = enc_l if enc_logit is None else enc_logit + enc_l
 
-            self.result.config(
-                text=f"Decrypted logit: {logit:.4f}\nSleep-apnea risk probability: {prob*100:.2f}%"
-            )
+            
+            logit = enc_logit.decrypt()[0]  # 최종 결과는 Client만 복호화 가능
+            prob  = sigmoid(logit)          # Sigmoid를 적용하여 위험도 계산
+            self._log_timing(f"--- total client-side flow: {(time.perf_counter()-t_flow_start)*1000:.1f} ms ---")
+            self._log_timing("(이 패턴은 병원간 통신이 없음 — 클라이언트가 세 병원 결과를 직접 합산)")
 
-            self.encrypted_text.insert("end", "\n[Encrypted Server Result]\n")
-            self.encrypted_text.insert(
-                "end",
-                encrypted_logit_b64[:1200] + "...\n\n",
-            )
-            self.encrypted_text.insert(
-                "end",
-                f"Encrypted logit length: {len(encrypted_logit_b64)} characters\n",
-            )
+            def update_ui():
+                self.result.config(
+                    text=f"logit: {logit:.4f}   |   수면무호흡 위험도: {prob*100:.2f}%"
+                )
+                self.status.config(text="Status: 3개 병원 응답 수신 → 로컬 복호화 완료.")
 
-            self.status.config(
-                text="Status: encrypted result received and decrypted locally."
-            )
+            self.after(0, update_ui)
 
+        except requests.exceptions.Timeout:
+            self.after(0, messagebox.showerror, "Timeout", "병원 서버 응답 시간 초과 (300s).")
+            self._set_status("Status: timeout.")
         except Exception as exc:
-            messagebox.showerror("Prediction failed", str(exc))
-            self.status.config(text=f"Status: failed - {exc}")
+            self.after(0, messagebox.showerror, "Prediction failed", str(exc))
+            self._set_status(f"Status: failed — {exc}")
+
+    # ── Phase 4: entry-point 병원 하나로 전송 → 병원간 통신으로 합산 → 복호화 ───
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Phase 4. Entry-point Inference
+        #
+        # Client → Entry Hospital
+        #            │
+        #            ├── Hospital A
+        #            ├── Hospital B
+        #            └── Hospital C
+        #
+        # - 클라이언트는 하나의 Entry-point 병원으로만 요청을 전송한다.
+        # - Entry 병원은 다른 병원들과 통신하여 각 병원의 Logit Share를 수집한다.
+        # - 병원 간 통신 시간과 Client↔Hospital 통신 시간을 각각 측정한다.
+        # - 최종 Logit Share는 클라이언트에서 합산 및 복호화한다.
+        # ─────────────────────────────────────────────────────────────────────────────
+    def _send_infer_task(self):
+        if ts is None:
+            self.after(0, messagebox.showerror, "TenSEAL error",
+                       f"TenSEAL not available.\n{IMPORT_ERROR}")
+            return
+        if self.context is None or self.normalized is None:
+            self._encrypt_task()
+        if self.normalized is None:
+            return
+
+        entry_id  = int(self.entry_choice.get().split()[-1])    # Entry-point 병원 선택
+        entry_url = HOSPITAL_URLS[entry_id]
+
+        pub_ctx = self.context.copy()
+        pub_ctx.make_context_public()
+        ctx_bytes = pub_ctx.serialize(
+            save_public_key=True, save_secret_key=False,
+            save_galois_keys=True, save_relin_keys=True,
+        )
+
+        self._clear_timing()
+        self._log_timing(f"=== Entry-point pattern (client -> hospital {entry_id} -> peers) ===")
+
+        try:
+            t_flow_start = time.perf_counter()
+
+            # 세 병원 모두 같은 컨텍스트를 알아야 암호문을 서로 더할 수 있음
+            for i, url in enumerate(HOSPITAL_URLS):
+                self._set_status(f"Status: 병원 {i} 컨텍스트 업로드 중...")
+                t0 = time.perf_counter()
+                resp = requests.post(
+                    f"{url}/upload_context",
+                    data=ctx_bytes,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=300,
+                )
+                resp.raise_for_status()
+                self._log_timing(f"upload_context -> hospital {i}: {(time.perf_counter()-t0)*1000:.1f} ms")
+
+            enc_xi_b64 = {}
+            for i, indices in enumerate(FEATURE_GROUPS):
+                x_slice  = [self.normalized[j] for j in indices]
+                pad      = _next_pow2(len(x_slice))
+                x_padded = x_slice + [0.0] * (pad - len(x_slice))
+                enc_xi   = ts.ckks_vector(self.context, x_padded)
+                enc_xi_b64[str(i)] = base64.b64encode(enc_xi.serialize()).decode()
+
+            self._set_status(f"Status: entry-point 병원 {entry_id} ({entry_url}) 에 /infer 요청 중...")
+            t0 = time.perf_counter()
+            resp = requests.post(
+                f"{entry_url}/infer",
+                json={"enc_xi_b64": enc_xi_b64},
+                timeout=300,
+            )
+            resp.raise_for_status()
+            client_to_entry_ms = (time.perf_counter() - t0) * 1000
+            body = resp.json()
+
+            self._log_timing(f"client -> entry hospital {entry_id} (/infer round trip): {client_to_entry_ms:.1f} ms  (client<->hospital)")
+
+            timing = body["timing"]
+            self._log_timing(f"  entry hospital local HE compute: {timing['local_compute_ms']:.1f} ms")
+            for peer_id, ms in timing["peer_calls_ms"].items():
+                self._log_timing(f"  entry hospital {entry_id} -> peer hospital {peer_id}: {ms:.1f} ms  (hospital<->hospital)")
+            self._log_timing(f"  entry hospital total server-side handling: {timing['total_ms']:.1f} ms")
+
+            # entry-point는 합산을 안 하고 각자의 enc(logit_share)만 릴레이함 —
+            # 최종 합산+복호화는 direct 패턴과 동일하게 client가 로컬에서 함
+            enc_logit = None
+            for share_b64 in body["enc_logit_shares_b64"].values():
+                enc_l = ts.ckks_vector_from(self.context, base64.b64decode(share_b64))
+                enc_logit = enc_l if enc_logit is None else enc_logit + enc_l
+            logit = enc_logit.decrypt()[0]
+            prob  = sigmoid(logit)
+            self._log_timing(f"--- total client-side flow: {(time.perf_counter()-t_flow_start)*1000:.1f} ms ---")
+
+            def update_ui():
+                self.result.config(
+                    text=f"logit: {logit:.4f}   |   수면무호흡 위험도: {prob*100:.2f}%  (entry-point: hospital {entry_id})"
+                )
+                self.status.config(text="Status: entry-point 병원 응답 수신 → 로컬 복호화 완료.")
+
+            self.after(0, update_ui)
+
+        except requests.exceptions.Timeout:
+            self.after(0, messagebox.showerror, "Timeout", "병원 서버 응답 시간 초과 (300s).")
+            self._set_status("Status: timeout.")
+        except Exception as exc:
+            self.after(0, messagebox.showerror, "Prediction failed", str(exc))
+            self._set_status(f"Status: failed — {exc}")
 
 
 if __name__ == "__main__":
