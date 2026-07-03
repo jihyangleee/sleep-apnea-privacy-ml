@@ -1,11 +1,9 @@
 import random
+import time                                            # 학습 단계별 시간 오버헤드 측정용
 import torch
 import torch.nn as nn
 
-from dataset import (
-    load_shhs_data, load_dreamt_data, generate_dummy_data,
-    partition_data_vertical,
-)
+from dataset import load_shhs_data, partition_data_vertical
 from model import HospitalModel
 from secret_sharing import additive_split, apply_dp_noise, BeaverProvider
 
@@ -25,8 +23,7 @@ SLEEP_CLIENT_LABELS = [
 
 
 def run_distributed_simulation(
-    csv_path: str = None,
-    dreamt_dir: str = None,
+    csv_path: str,
     n_epochs: int = 30,
     batch_size: int = 32,
     dp_sigma: float = 0.01,
@@ -41,21 +38,21 @@ def run_distributed_simulation(
     - DP noise injected into each share in transit.
     - Top-model is a single linear layer → decomposes over additive shares
       without any Beaver Triple (linearity eliminates the need for MPC).
+    - Labels are additively secret-shared too — no single "label holder"
+      party ever sees y in the clear. Loss is MSE (not BCE) specifically
+      because its gradient is a plain subtraction (pred - y), which additive
+      shares support natively; BCE's gradient needs division, which would
+      require a secure-division protocol on top of Beaver Triple.
 
     Returns: (hospitals, shared_W, scaler)
     """
-    # ── Data loading ──────────────────────────────────────────────────────────
-    if dreamt_dir is not None:
-        print("[Distributed FL] DREAMT 데이터 로드")
-        X, y, scaler = load_dreamt_data(dreamt_dir, return_scaler=True)
-    elif csv_path is not None:
-        print("[Distributed FL] SHHS 데이터 로드")
-        X, y, scaler = load_shhs_data(csv_path, return_scaler=True)
-    else:
-        print("[Distributed FL] CSV not provided - synthetic dummy data 사용")
-        X, y, scaler = generate_dummy_data(return_scaler=True)
+    # ── Data loading — real SHHS-1 CSV only ─────────────────────────────────────
+    print("[Distributed FL] SHHS 데이터 로드")
+    t_data_start = time.perf_counter()
+    X, y, scaler = load_shhs_data(csv_path, return_scaler=True)
+    print(f"  [timing] CSV 로드+전처리: {(time.perf_counter()-t_data_start)*1000:.1f} ms")
 
-    partitions, _, _, _, _ = partition_data_vertical(
+    partitions, _, _, y_train_raw, y_test_raw = partition_data_vertical(
         X, y, num_clients=NUM_CLIENTS, feature_groups=SLEEP_FEATURE_GROUPS
     )
 
@@ -83,8 +80,8 @@ def run_distributed_simulation(
         torch.tensor(partitions[i]["X_test"], dtype=torch.float32)
         for i in range(NUM_CLIENTS)
     ]
-    y_train = torch.tensor(partitions[0]["y_train"], dtype=torch.float32)
-    y_test  = torch.tensor(partitions[0]["y_test"],  dtype=torch.float32)
+    y_train = torch.tensor(y_train_raw, dtype=torch.float32)
+    y_test  = torch.tensor(y_test_raw,  dtype=torch.float32)
     n = len(y_train)
 
     # ── Optimizer: all sub-models + shared top linear ─────────────────────────
@@ -93,15 +90,22 @@ def run_distributed_simulation(
         params.extend(h.sub.parameters())
     params.extend(shared_W.parameters())
     optimizer = torch.optim.Adam(params, lr=1e-3)
-    criterion = nn.BCELoss()
     beaver    = BeaverProvider(NUM_CLIENTS)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     print(f"\n[Distributed FL] 학습 시작 - {n_epochs} epochs, batch={batch_size}")
+    t_train_start = time.perf_counter()
+    STEP_NAMES = [
+        "local_emb", "ss_split", "dp_concat",
+        "top_layer", "beaver_sigmoid", "label_ss_loss",
+        "backward", "optimizer_step",
+    ]
     for epoch in range(1, n_epochs + 1):
         perm       = torch.randperm(n)
         epoch_loss = 0.0
         n_batches  = 0
+        step_ms    = {name: 0.0 for name in STEP_NAMES}
+        t_epoch_start = time.perf_counter()
 
         for start in range(0, n, batch_size):
             idx     = perm[start : start + batch_size]
@@ -109,6 +113,7 @@ def run_distributed_simulation(
             optimizer.zero_grad()
 
             # Step 1: each hospital computes its local embedding (private)
+            t0 = time.perf_counter()
             local_embs = [
                 hospitals[i].local_emb(X_trains[i][idx]) for i in range(NUM_CLIENTS)
             ]
@@ -117,11 +122,15 @@ def run_distributed_simulation(
             if dp_sigma > 0:
                 for emb in local_embs:
                     emb.register_hook(lambda g: g + torch.randn_like(g) * dp_sigma)
+            step_ms["local_emb"] += (time.perf_counter() - t0) * 1000
 
             # Step 2: additive SS split
+            t0 = time.perf_counter()
             all_shares = [additive_split(emb, n=NUM_CLIENTS) for emb in local_embs]
+            step_ms["ss_split"] += (time.perf_counter() - t0) * 1000
 
             # Step 3: DP noise in transit → each hospital receives concat of noisy shares
+            t0 = time.perf_counter()
             concat_shares = []
             for j in range(NUM_CLIENTS):
                 received = [
@@ -130,29 +139,49 @@ def run_distributed_simulation(
                 ]
                 concat_shares.append(torch.cat(received, dim=1))
             # concat_shares[j]: (batch, NUM_CLIENTS * emb_dim) + DP noise
+            step_ms["dp_concat"] += (time.perf_counter() - t0) * 1000
 
             # Step 4: each hospital applies shared top linear to its concat share
             # sum_j logit_share_j = W @ cat(embs) + b = logit  [by linearity]
+            t0 = time.perf_counter()
             logit_shares = [
                 hospitals[j].logit_share(concat_shares[j], j == 0)
                 for j in range(NUM_CLIENTS)
             ]
+            step_ms["top_layer"] += (time.perf_counter() - t0) * 1000
 
             # Step 5: Beaver Triple sigmoid — σ(logit) ≈ 0.5 + 0.197x - 0.004x³
             # logit stays in share form; no party reconstructs the raw logit.
             # x³ needs 2 multiplications → 2 triples.
+            t0 = time.perf_counter()
             triple1 = beaver.generate_triple(logit_shares[0].shape)
             triple2 = beaver.generate_triple(logit_shares[0].shape)
             pred_shares = beaver.sigmoid_approx(logit_shares, triple1, triple2)
+            step_ms["beaver_sigmoid"] += (time.perf_counter() - t0) * 1000
 
-            # Label holder sums pred shares → sees only the final prediction [0,1]
-            pred = sum(pred_shares).clamp(1e-6, 1 - 1e-6)
-            loss = criterion(pred, y_batch.unsqueeze(1))
+            # Step 6: label is secret-shared too — no party ever holds y alone.
+            # MSE gradient is a plain subtraction (pred - y), so summing
+            # (pred_share_i - y_share_i) reconstructs exactly pred - y without
+            # needing a division protocol the way BCE's gradient would.
+            t0 = time.perf_counter()
+            y_shares    = additive_split(y_batch.unsqueeze(1), n=NUM_CLIENTS)
+            diff_shares = [pred_shares[i] - y_shares[i] for i in range(NUM_CLIENTS)]
+            diff        = sum(diff_shares)
+            loss        = (diff ** 2).mean()
+            step_ms["label_ss_loss"] += (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             loss.backward()
+            step_ms["backward"] += (time.perf_counter() - t0) * 1000
+
+            t0 = time.perf_counter()
             optimizer.step()
+            step_ms["optimizer_step"] += (time.perf_counter() - t0) * 1000
 
             epoch_loss += loss.item()
             n_batches  += 1
+
+        epoch_wall_ms = (time.perf_counter() - t_epoch_start) * 1000
 
         if epoch % 5 == 0 or epoch == 1:
             with torch.no_grad():
@@ -165,8 +194,12 @@ def run_distributed_simulation(
                 acc   = (pred == y_test).float().mean().item()
             print(
                 f"  Epoch {epoch:3d}/{n_epochs} | "
-                f"loss={epoch_loss/n_batches:.4f} | test_acc={acc:.4f}"
+                f"loss={epoch_loss/n_batches:.4f} | test_acc={acc:.4f} | "
+                f"wall={epoch_wall_ms:.1f}ms ({n_batches} batches)"
             )
+            breakdown = ", ".join(f"{name}={ms:.1f}ms" for name, ms in step_ms.items())
+            print(f"    [timing] step breakdown (sum over epoch): {breakdown}")
 
-    print("[Distributed FL] 학습 완료")
+    train_total_s = time.perf_counter() - t_train_start
+    print(f"[Distributed FL] 학습 완료 — 총 {train_total_s:.1f}s ({n_epochs} epochs)")
     return hospitals, shared_W, scaler
