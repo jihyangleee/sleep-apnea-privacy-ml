@@ -392,7 +392,7 @@ class SecureHealthClient(tk.Tk):
         entry_url = HOSPITAL_URLS[entry_id]
 
         pub_ctx = self.context.copy()
-        pub_ctx.make_context_public()
+        pub_ctx.make_context_public() 
         ctx_bytes = pub_ctx.serialize(
             save_public_key=True, save_secret_key=False,
             save_galois_keys=True, save_relin_keys=True,
@@ -404,13 +404,13 @@ class SecureHealthClient(tk.Tk):
         try:
             t_flow_start = time.perf_counter()
 
-            # 세 병원 모두 같은 컨텍스트를 알아야 암호문을 서로 더할 수 있음
+            # 세 병원 모두 같은 컨텍스트를 알아야 암호문을 서로 더할 수 있음 
             for i, url in enumerate(HOSPITAL_URLS):
                 self._set_status(f"Status: 병원 {i} 컨텍스트 업로드 중...")
                 t0 = time.perf_counter()
-                resp = requests.post(
-                    f"{url}/upload_context",
-                    data=ctx_bytes,
+                resp = requests.post( #  context 업로드
+                    f"{url}/upload_context", 
+                    data=ctx_bytes, 
                     headers={"Content-Type": "application/octet-stream"},
                     timeout=300,
                 )
@@ -421,15 +421,17 @@ class SecureHealthClient(tk.Tk):
             for i, indices in enumerate(FEATURE_GROUPS):
                 x_slice  = [self.normalized[j] for j in indices]
                 pad      = _next_pow2(len(x_slice))
-                x_padded = x_slice + [0.0] * (pad - len(x_slice))
-                enc_xi   = ts.ckks_vector(self.context, x_padded)
-                enc_xi_b64[str(i)] = base64.b64encode(enc_xi.serialize()).decode()
+                x_padded = x_slice + [0.0] * (pad - len(x_slice)) 
+                enc_xi   = ts.ckks_vector(self.context, x_padded) 
+                enc_xi_b64[str(i)] = base64.b64encode(enc_xi.serialize()).decode()  # 바이너리코드를 json 
+                # 에 넣기 위해 base64 인코딩 -> ascii 로 변환 
 
             self._set_status(f"Status: entry-point 병원 {entry_id} ({entry_url}) 에 /infer 요청 중...")
             t0 = time.perf_counter()
+            # 추론할 때 json 데이터에 암호문을 넣음  
             resp = requests.post(
                 f"{entry_url}/infer",
-                json={"enc_xi_b64": enc_xi_b64},
+                json={"enc_xi_b64": enc_xi_b64},  
                 timeout=300,
             )
             resp.raise_for_status()
@@ -444,6 +446,7 @@ class SecureHealthClient(tk.Tk):
                 self._log_timing(f"  entry hospital {entry_id} -> peer hospital {peer_id}: {ms:.1f} ms  (hospital<->hospital)")
             self._log_timing(f"  entry hospital total server-side handling: {timing['total_ms']:.1f} ms")
 
+            # 마지막 합산 단계 
             # entry-point는 합산을 안 하고 각자의 enc(logit_share)만 릴레이함 —
             # 최종 합산+복호화는 direct 패턴과 동일하게 client가 로컬에서 함
             enc_logit = None

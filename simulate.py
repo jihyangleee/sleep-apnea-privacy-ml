@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from dataset import load_shhs_data, partition_data_vertical
 from model import HospitalModel
-from secret_sharing import additive_split, apply_dp_noise, BeaverProvider
+from secret_sharing import additive_split, BeaverProvider
 
 NUM_CLIENTS = 3
 
@@ -34,10 +34,13 @@ def run_distributed_simulation(
     Privacy model
     -------------
     - Sub-model runs locally on each hospital (private features never shared).
-    - Embeddings are additively secret-shared before transmission.
-    - DP noise injected into each share in transit.
-    - Top-model is a single linear layer → decomposes over additive shares
-      without any Beaver Triple (linearity eliminates the need for MPC).
+    - Embeddings never leave the hospital that computed them — each hospital
+      applies its own W_top column-slice to its own local embedding directly,
+      so no embedding secret-sharing or cross-hospital transmission happens.
+    - The resulting per-hospital logit is already an additive share of the
+      true logit (block-linearity of W_top over the concatenation); Beaver
+      Triple is used only to secure the nonlinear sigmoid computed over
+      these shares, so no party ever reconstructs the raw logit.
     - Labels are additively secret-shared too — no single "label holder"
       party ever sees y in the clear. Loss is MSE (not BCE) specifically
       because its gradient is a plain subtraction (pred - y), which additive
@@ -59,8 +62,8 @@ def run_distributed_simulation(
     print("[Distributed FL] feature 분배:")
     for i, label in enumerate(SLEEP_CLIENT_LABELS):
         print(f"  hospital {i}: {label}")
-    print(f"  DP sigma={dp_sigma}  (embedding share 전송 시 Gaussian noise)")
-    print(f"  Top-model: 단일 linear — SS 분해로 Beaver Triple 없이 분산 계산")
+    print(f"  DP sigma={dp_sigma}  (embedding gradient에 Gaussian noise, label 추론 방지)")
+    print(f"  Top-model: 단일 linear — 병원별 column-slice를 로컬 임베딩에 적용, 통신 없음")
 
     # ── Build hospitals with SHARED single top-model ──────────────────────────
     total_emb = emb_dim * NUM_CLIENTS
@@ -96,7 +99,7 @@ def run_distributed_simulation(
     print(f"\n[Distributed FL] 학습 시작 - {n_epochs} epochs, batch={batch_size}")
     t_train_start = time.perf_counter()
     STEP_NAMES = [
-        "local_emb", "ss_split", "dp_concat",
+        "local_emb",
         "top_layer", "beaver_sigmoid", "label_ss_loss",
         "backward", "optimizer_step",
     ]
@@ -124,33 +127,17 @@ def run_distributed_simulation(
                     emb.register_hook(lambda g: g + torch.randn_like(g) * dp_sigma)
             step_ms["local_emb"] += (time.perf_counter() - t0) * 1000
 
-            # Step 2: additive SS split
-            t0 = time.perf_counter()
-            all_shares = [additive_split(emb, n=NUM_CLIENTS) for emb in local_embs]
-            step_ms["ss_split"] += (time.perf_counter() - t0) * 1000
-
-            # Step 3: DP noise in transit → each hospital receives concat of noisy shares
-            t0 = time.perf_counter()
-            concat_shares = []
-            for j in range(NUM_CLIENTS):
-                received = [
-                    apply_dp_noise(all_shares[i][j], dp_sigma)
-                    for i in range(NUM_CLIENTS)
-                ]
-                concat_shares.append(torch.cat(received, dim=1))
-            # concat_shares[j]: (batch, NUM_CLIENTS * emb_dim) + DP noise
-            step_ms["dp_concat"] += (time.perf_counter() - t0) * 1000
-
-            # Step 4: each hospital applies shared top linear to its concat share
-            # sum_j logit_share_j = W @ cat(embs) + b = logit  [by linearity]
+            # Step 2: each hospital applies its own W_top column-slice to its
+            # own local embedding — no cross-hospital exchange needed.
+            # sum_j logit_share_j = W @ cat(embs) + b = logit  [by block-linearity]
             t0 = time.perf_counter()
             logit_shares = [
-                hospitals[j].logit_share(concat_shares[j], j == 0)
+                hospitals[j].logit_share(local_embs[j], j == 0)
                 for j in range(NUM_CLIENTS)
             ]
             step_ms["top_layer"] += (time.perf_counter() - t0) * 1000
 
-            # Step 5: Beaver Triple sigmoid — σ(logit) ≈ 0.5 + 0.197x - 0.004x³
+            # Step 3: Beaver Triple sigmoid — σ(logit) ≈ 0.5 + 0.197x - 0.004x³
             # logit stays in share form; no party reconstructs the raw logit.
             # x³ needs 2 multiplications → 2 triples.
             t0 = time.perf_counter()
@@ -159,7 +146,7 @@ def run_distributed_simulation(
             pred_shares = beaver.sigmoid_approx(logit_shares, triple1, triple2)
             step_ms["beaver_sigmoid"] += (time.perf_counter() - t0) * 1000
 
-            # Step 6: label is secret-shared too — no party ever holds y alone.
+            # Step 4: label is secret-shared too — no party ever holds y alone.
             # MSE gradient is a plain subtraction (pred - y), so summing
             # (pred_share_i - y_share_i) reconstructs exactly pred - y without
             # needing a division protocol the way BCE's gradient would.

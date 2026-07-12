@@ -30,15 +30,22 @@ class ClientSubModel(nn.Module):
 
 
 class HospitalModel(nn.Module):
-    """Per-hospital model: private sub-model + shared column slice of top-model.
+    """Per-hospital model: private sub-model + own column slice of top-model.
 
-    Training  — additive SS; linear top-model decomposes over shares (no Beaver Triple needed)
+    Training  — each hospital applies its own W_top column-slice to its own
+                local embedding; the embedding never leaves the hospital.
+                The resulting per-hospital logits are already additive
+                shares of the true logit (block-linearity of W_top over the
+                concatenation), so Beaver Triple is only needed to secure
+                the nonlinear sigmoid computed over those shares.
     Inference — CKKS ciphertext arithmetic (patient features never decrypted)
 
-    Inference protocol (3 hospitals, 1 round):
-      1. Each hospital: enc(features_i) → sub_model → enc(emb_i) → W_top_i → enc(logit_i)
-      2. Coordinator: enc(logit) = Σ enc(logit_i) + b_top
-      3. Patient decrypts enc(logit) and applies exact sigmoid locally
+    Both protocols follow the same shape (3 hospitals, 1 round):
+      1. Each hospital: features_i → sub_model → emb_i → W_top_i → logit_i
+      2. Coordinator: logit = Σ logit_i + b_top  (plaintext sum for training,
+         ciphertext sum for inference)
+      3. Sigmoid: Beaver Triple approximation (training) or exact after
+         decrypt (inference)
     """
 
     def __init__(
@@ -71,13 +78,20 @@ class HospitalModel(nn.Module):
         """Sub-model forward on own features. Plaintext, stays local."""
         return self.sub(x_local)
 
-    def logit_share(self, cat_share: torch.Tensor, is_first: bool) -> torch.Tensor:
-        """Apply shared top linear (no bias) to a received concat-embedding share.
+    def logit_share(self, local_embedding: torch.Tensor, is_first: bool) -> torch.Tensor:
+        """Apply this hospital's own column-slice of the shared top linear to
+        its own local embedding — no cross-hospital embedding exchange needed.
 
-        sum_j( logit_share_j ) = cat(embs) @ W_top.T + W_top.bias = logit
-        Linearity over additive shares removes the need for Beaver Triple.
+        W_top @ concat(embs) decomposes over the block structure of the
+        concatenation:
+            sum_j( W_top[:, j*emb_dim:(j+1)*emb_dim] @ emb_j ) + bias = logit
+        so each hospital only ever needs its own embedding and its own
+        weight columns. The resulting logit_share is already an additive
+        share of the true logit — no Beaver Triple needed for this step.
         """
-        logit = F.linear(cat_share, self.top_W.weight)
+        start   = self.id * self.emb_dim
+        W_slice = self.top_W.weight[:, start : start + self.emb_dim]
+        logit   = F.linear(local_embedding, W_slice)
         if is_first:
             logit = logit + self.top_W.bias
         return logit
@@ -130,13 +144,13 @@ class HospitalModel(nn.Module):
           step 1: z² = z*z          (-1 level)
           step 2: z*(0.197+0.004*z²) (-1 level; TenSEAL auto-modswitch z to z²'s level)
         """
-        import tenseal as ts
+        import tenseal as ts #동형암호 라이브러리 
         assert self._he_built, "call build_he_weights() after loading model"
 
-        enc_z = ts.lazy_ckks_vector_from(enc_xi_bytes)
-        enc_z.link_context(ctx)
-        enc_z.mm_(self._W_sub_T)
-        enc_z += self._b_sub
+        enc_z = ts.lazy_ckks_vector_from(enc_xi_bytes) # bytes를 객체로 만들어줌 
+        enc_z.link_context(ctx) # ctx 정보를 활용 
+        enc_z.mm_(self._W_sub_T)  # submodel 에서 연산 
+        enc_z += self._b_sub # 절편값 더함
 
         # Cubic activation: z * (0.197 + 0.004 * z²)
         enc_z2  = enc_z * enc_z                       # -1 HE level
@@ -154,10 +168,10 @@ class HospitalModel(nn.Module):
         import tenseal as ts
         assert self._he_built
 
-        enc_logit = ts.lazy_ckks_vector_from(enc_emb_bytes)
+        enc_logit = ts.lazy_ckks_vector_from(enc_emb_bytes) #embedding 값을 부여받음 
         enc_logit.link_context(ctx)
-        enc_logit.mm_(self._W_top_T)
-        return enc_logit.serialize()
+        enc_logit.mm_(self._W_top_T) # top model 과 연산 
+        return enc_logit.serialize() 
 
     def run_he_inference(
         self,
