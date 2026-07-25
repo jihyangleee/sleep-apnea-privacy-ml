@@ -30,7 +30,8 @@ HOSPITAL_URLS = [
 # SHHS feature 순서: spo2, avg_hr, slptime, slp_eff, timest34p, age, sex, bmi
 FEATURE_GROUPS = [[0, 1], [2, 3, 4], [5, 6, 7]]
 
-# GUI 입력 필드 (SHHS feature 순서에 맞춤)
+# GUI 입력 필드 (SHHS feature 순서에 맞춤) 
+
 FEATURES = [
     ("SpO2 (%)",                "spo2",       95.0),
     ("Avg heart rate (bpm)",    "avg_hr",     72.0),
@@ -43,7 +44,6 @@ FEATURES = [
 ]
 
 DEMO_SHOW_SECRET_KEY = True
-
 
 def normalize(values):
     spo2, avg_hr, slptime, slp_eff, timest34p, age, sex, bmi = values
