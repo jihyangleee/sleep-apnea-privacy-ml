@@ -23,3 +23,5 @@ def build_he_context() -> ts.Context:
     ctx.global_scale = 2 ** 40
     ctx.generate_galois_keys()
     return ctx
+
+

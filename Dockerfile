@@ -12,5 +12,6 @@ COPY model.py dataset.py secret_sharing.py simulate.py he_client.py schemas.py h
 ENV HOSPITAL_ID=0
 ENV MODEL_PATH=/shared/vertical_model.pt
 ENV CSV_PATH=""
+ENV PYTHONUNBUFFERED=1
 
 CMD ["sh", "-c", "uvicorn hospital_app:app --host 0.0.0.0 --port 8000"]

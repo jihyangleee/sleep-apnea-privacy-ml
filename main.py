@@ -19,13 +19,12 @@ ENTRY_LABELS = ["Hospital A", "Hospital B", "Hospital C"]
 # ── Distributed FL (SS + DP noise, linear top-model) ──────────────────────────
 
 def run_distributed_fl(
-    csv_path: str = None,
-    dreamt_dir: str = None,
+    csv_path: str,
     dp_sigma: float = 0.01,
 ):
     """Fully distributed VFL training — single linear top-model, no Beaver Triple."""
     hospitals, shared_W, scaler = run_distributed_simulation(
-        csv_path, dreamt_dir, n_epochs=30, dp_sigma=dp_sigma
+        csv_path, n_epochs=30, dp_sigma=dp_sigma
     )
 
     emb_dim = hospitals[0].emb_dim
@@ -160,8 +159,7 @@ if __name__ == "__main__":
             "he-infer    : HE 암호화 추론 데모"
         ),
     )
-    parser.add_argument("--csv",    default=None, help="SHHS-1 CSV 경로")
-    parser.add_argument("--dreamt", default=None, help="DREAMT v2.1.0 루트 경로")
+    parser.add_argument("--csv", default=None, help="SHHS-1 CSV 경로 (--mode distributed 시 필수)")
     parser.add_argument(
         "--dp-sigma",
         type=float,
@@ -171,6 +169,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == "distributed":
-        run_distributed_fl(args.csv, args.dreamt, dp_sigma=args.dp_sigma)
+        if args.csv is None:
+            parser.error("--mode distributed 에는 --csv 가 필수입니다.")
+        run_distributed_fl(args.csv, dp_sigma=args.dp_sigma)
     elif args.mode == "he-infer":
         run_he_infer()

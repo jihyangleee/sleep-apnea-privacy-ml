@@ -9,6 +9,26 @@ def additive_split(x: torch.Tensor, n: int = 3) -> List[torch.Tensor]:
     return noise + [last]
 
 
+def additive_split_symmetric(x: torch.Tensor, n: int = 3) -> List[torch.Tensor]:
+    """Additive secret share where EVERY share carries an equal, differentiable
+    slice of x — unlike additive_split(), where only the last share is a real
+    function of x and the rest are pure noise (fine when only one recipient
+    ever needs to route gradient back through its share, but wrong when a
+    mesh of n parties each independently receive one share and must all be
+    able to route d(loss)/d(their share) back to x's owner).
+
+    share_i = x/n + r_i,  for i < n-1  (r_i random, mean-zero across the set)
+    share_{n-1} = x/n - sum(r_i)
+
+    Every share has d(share_i)/dx = 1/n, so gradients returned by ANY subset
+    of recipients accumulate correctly: sum_i d(share_i)/dx = 1.
+    """
+    base = x / n
+    r = [torch.randn_like(x) for _ in range(n - 1)]
+    last = base - sum(r)
+    return [base + ri for ri in r] + [last]
+
+
 def apply_dp_noise(share: torch.Tensor, sigma: float) -> torch.Tensor:
     """Gaussian DP noise injected into a share before transmission. sigma=0 disables."""
     if sigma <= 0.0:
