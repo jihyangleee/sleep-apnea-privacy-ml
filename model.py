@@ -29,6 +29,35 @@ class ClientSubModel(nn.Module):
         return self.embed(self.act(self.linear(x)))
 
 
+class FeatureTokenizer(nn.Module):
+    """FT-Transformer style per-feature tokenizer (linear_attention.md §3.1).
+
+    Unlike ClientSubModel, which collapses a hospital's features into a
+    single emb_dim embedding, this keeps one token PER feature so the
+    top-model can attend across all 8 features (+ [CLS]) as a 9-token
+    sequence. Standard numerical-feature tokenization (Gorishniy et al.,
+    "Revisiting Deep Learning Models for Tabular Data", 2021):
+        token_i = bias_i + x_i * weight_i
+    i.e. each feature gets its own learned (weight, bias) pair projecting
+    its scalar value into a d-dim token — a per-feature nn.Linear(1, d)
+    implemented as a single batched weight/bias for all of this hospital's
+    features at once.
+
+    Stays local, plaintext PyTorch — like ClientSubModel, this never needs
+    MPC/HE protection since it only touches this hospital's own features.
+    """
+    def __init__(self, n_features: int, d: int = 16):
+        super().__init__()
+        self.n_features = n_features
+        self.d          = d
+        self.weight = nn.Parameter(torch.randn(n_features, d) / d ** 0.5)
+        self.bias   = nn.Parameter(torch.zeros(n_features, d))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (batch, n_features) -> tokens: (batch, n_features, d)"""
+        return x.unsqueeze(-1) * self.weight + self.bias
+
+
 class HospitalModel(nn.Module):
     """Per-hospital model: private sub-model + own column slice of top-model.
 
