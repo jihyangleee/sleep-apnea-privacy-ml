@@ -13,6 +13,11 @@ SHHS_FEATURES = [
     "age_s1",     # age
     "gender",     # sex: 1=남, 2=여
     "bmi_s1",     # BMI
+    # feature 확장 실험 (워치/앱으로 수집 가능한 SHHS 변수만 선정)
+    "waso",           # wake after sleep onset (분) — actigraphy로 워치가 추정 가능
+    "sleep_latency",  # 값이 0/1만 관측됨 — 연속 잠복시간이 아니라 이진 지표로 보임, 원본 그대로 사용
+    "neck20",         # 목둘레 — 앱 1회 수동 입력
+    "ess_s1",         # Epworth 졸림 점수 — 앱 온보딩 설문(자기보고)
 ]
 # CSV에서 avg_hr을 계산할 때 사용하는 4개 컬럼 (NREM/REM × 앙와위/비앙와위)
 _SHHS_HR_COLS = ["savbnbh", "savbnoh", "savbrbh", "savbroh"]

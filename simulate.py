@@ -10,15 +10,15 @@ from secret_sharing import additive_split, BeaverProvider
 NUM_CLIENTS = 3
 
 SLEEP_FEATURE_GROUPS = [
-    [0, 1],      # client A — 심박·산소 모니터링: SpO2(avgsao2), avg HR(avg_hr)
-    [2, 3, 4],   # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio
-    [5, 6, 7],   # client C — 병원/클리닉: age, sex, BMI
+    [0, 1],            # client A — 심박·산소 모니터링: SpO2(avgsao2), avg HR(avg_hr)
+    [2, 3, 4, 8, 9],   # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio, waso, sleep_latency
+    [5, 6, 7, 10, 11], # client C — 병원/클리닉: age, sex, BMI, neck20, ess_s1
 ]
 
 SLEEP_CLIENT_LABELS = [
     "심박·산소 모니터링(SpO2, avg HR)",
-    "수면검사실(total sleep, efficiency, deep ratio)",
-    "병원(age, sex, BMI) + label",
+    "수면검사실(total sleep, efficiency, deep ratio, waso, sleep_latency)",
+    "병원(age, sex, BMI, neck20, ess_s1) + label",
 ]
 
 

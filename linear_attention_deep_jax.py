@@ -48,6 +48,8 @@ def init_params_deep(key, d: int, num_layers: int) -> dict:
     return {
         "cls_token": jax.random.normal(keys[0], (d,)) * scale,
         "layers": layers,
+        "final_ln_gamma": jnp.ones((d,)),
+        "final_ln_beta":  jnp.zeros((d,)),
         "W_head": jax.random.normal(keys[1], (d, 1)) * scale,
         "b_head": jnp.zeros((1,)),
     }
@@ -73,6 +75,12 @@ def forward_deep(feature_tokens: jnp.ndarray, params: dict) -> jnp.ndarray:
     for layer_p in params["layers"]:
         tokens = linear_attention_block(tokens, layer_p)
 
+    # Final LN before the head -- the un-normalized residual stream can grow
+    # across layers even though each block's Q/K/V input was pre-LN'd; this
+    # was the likely main cause of the earlier catastrophic blow-up (loss in
+    # the hundreds of millions) since cls_out fed straight into the cubic
+    # sigmoid_approx, which is only valid for |logit| ~< 4.
+    tokens  = layer_norm(tokens, params["final_ln_gamma"], params["final_ln_beta"])
     cls_out = tokens[:, 0, :]
     logit   = cls_out @ params["W_head"] + params["b_head"]
     return logit

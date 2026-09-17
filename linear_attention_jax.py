@@ -60,12 +60,20 @@ def linear_attention_forward(feature_tokens: jnp.ndarray, params: dict) -> jnp.n
     cls   = jnp.broadcast_to(params["cls_token"], (batch, 1, feature_tokens.shape[-1]))
     tokens = jnp.concatenate([cls, feature_tokens], axis=1)  # (batch, 9, d)
 
-    Q = tokens @ params["W_Q"]   # (batch, 9, d) -- cipher x plaintext, free HE level
+    Q = tokens @ params["W_Q"]   # (batch, N, d) -- cipher x plaintext, free HE level
     K = tokens @ params["W_K"]
     V = tokens @ params["W_V"]
 
+    # phi(K)^T @ V sums over the N token axis, so its scale grows with N --
+    # this is exactly what made the 12-feature (13-token) run train worse
+    # than the 8-feature (9-token) one. N is architecture-fixed (not
+    # data-dependent), so dividing by it is a public-constant scalar
+    # multiply (1/N), not a secure division -- free under CKKS/MPC, unlike
+    # normalizing by a data-dependent sum the way real linear-attention
+    # denominators (Katharopoulos et al. 2020) do.
+    n_tokens = tokens.shape[1]
     phi_Q, phi_K = phi(Q), phi(K)                              # 1 HE level each
-    KV       = jnp.einsum("bnd,bne->bde", phi_K, V)            # 1 more level
+    KV       = jnp.einsum("bnd,bne->bde", phi_K, V) / n_tokens  # 1 more level
     attn_out = jnp.einsum("bnd,bde->bne", phi_Q, KV)           # 1 more level (3 total)
 
     cls_out = attn_out[:, 0, :]                                # (batch, d)

@@ -231,24 +231,94 @@ enc_logit   = Σ_i enc_logit_i + b_top              ← 환자(client)가 직접
 
 ## 파일 구조
 
+루트에는 여러 곳에서 import 되는 **공용 모듈**만 두고, 단독 실행되는 스크립트는
+용도별 폴더로 묶는다. 폴더 안의 스크립트는 **저장소 루트에서 `python -m` 으로 실행**한다
+(루트가 `sys.path`에 올라가야 `from model import ...` 이 그대로 동작하기 때문).
+
 ```
-├── dataset.py         데이터 로드 (SHHS / DREAMT / 합성)
-├── model.py           ClientSubModel, PolyActivation, HospitalModel (학습+추론 통합)
-├── secret_sharing.py  additive_split, apply_dp_noise, BeaverProvider
-├── simulate.py        run_distributed_simulation (SS + DP noise, 분산 학습)
-├── he_client.py       build_he_context (환자·병원 공유 CKKS 컨텍스트)
-├── hospital_app.py    FastAPI 병원 서버 (병원별 독립 실행)
-├── client_gui.py      Galaxy Watch 역할 데스크톱 GUI 클라이언트 (Tkinter, 코디네이터 없음)
-├── schemas.py         FastAPI Pydantic 요청/응답 모델
-└── main.py            진입점 (--mode distributed / he-infer)
+├── main.py                    진입점 (--mode distributed / he-infer)
+│
+│   ── 공용 모듈 (루트) ──────────────────────────────────────────────
+├── dataset.py                 데이터 로드 (SHHS / DREAMT / 합성)
+├── model.py                   ClientSubModel, PolyActivation, HospitalModel, FeatureTokenizer
+├── secret_sharing.py          additive_split, apply_dp_noise, BeaverProvider
+├── simulate.py                run_distributed_simulation (SS + DP noise, 분산 학습)
+├── he_client.py               build_he_context (환자·병원 공유 CKKS 컨텍스트)
+├── schemas.py                 FastAPI Pydantic 요청/응답 모델
+├── linear_attention_jax.py    linear attention 1블록 (JAX, forward/grad)
+├── linear_attention_deep_jax.py  다층 linear attention (pre-LN + residual)
+├── top_layer_jax.py           SPU에 올리는 top-layer loss/grad
+├── extract_desat_features.py  SpO2 desaturation 피처 추출 (odi 등, NSRR XML)
+│
+├── app/                       실제 서비스 (FastAPI + GUI)
+│   ├── hospital_app.py        FastAPI 병원 서버 (병원별 독립 실행)
+│   └── client_gui.py          Galaxy Watch 역할 데스크톱 GUI (Tkinter, 코디네이터 없음)
+│
+├── mpc/                       SecretFlow SPU (MPC) 실험
+│   ├── simulate_spu.py        SPU 기반 분산 학습 시뮬레이션
+│   └── spu_top_layer_test.py  top-layer만 SPU에 올린 최소 동작 테스트
+│
+├── experiments/               평문 JAX 실험 (HE/MPC 없이 정확도만 확인)
+│   ├── simulate_linear_attention.py   단일 블록 베이스라인
+│   ├── simulate_watch_domain_gap.py   PSG → 워치 도메인 갭 측정
+│   ├── architecture/          모델 구조·학습 안정화 비교
+│   │   ├── compare_depth_experiment.py    깊이 (clipping 이전, 발산)
+│   │   ├── compare_depth_clipped.py       깊이 (clipping + final LN)
+│   │   ├── compare_width_clipping.py      너비 d, gradient clipping
+│   │   ├── compare_normalization_waso.py  정규화 방식
+│   │   ├── compare_loss_function.py       손실 함수
+│   │   └── compare_mlp_vs_attention.py    MLP vs linear attention
+│   └── features/              피처 구성 실험
+│       ├── feature_ablation_experiment.py  피처 ablation (+ load_with_features 로더)
+│       ├── combined_desat_experiment.py    8피처 + waso/latency + desat 피처
+│       └── event_feature_experiment.py     이벤트 기반 피처
+│
+└── docs/
+    ├── linear_attention.md       P2P VFL + SPU/CKKS 전체 아키텍처
+    ├── submodel.md               sub-model 설계 노트 (HE 곱셈 깊이 제약)
+    └── CRYPTEN_MESH_DESIGN.md    CrypTen mesh 구조 설계 (미구현, 논의 단계)
 ```
+
+### 실험 스크립트 실행
+
+```bash
+# 저장소 루트에서 -m 으로 실행한다 (폴더 안에서 직접 실행하면 import가 깨진다)
+python -m experiments.simulate_linear_attention
+python -m experiments.architecture.compare_depth_clipped
+python -m experiments.features.combined_desat_experiment
+python -m mpc.simulate_spu
+```
+
+### 제거된 실험 — CVHR (ECG 기반 심박 변동)
+
+`extract_cvhr_feature.py` / `extract_cvhr_acat.py` / `simulate_ppg_cvhr.py` /
+`combined_feature_experiment.py` 는 삭제했다. SHHS R-point 주석에서 뽑은 CVHR index는
+AHI와 상관이 있었지만(r=0.474, n=89) ECG 수준의 피크 정밀도가 필요했고, PPG 노이즈를
+씌운 시뮬레이션에서 재현되지 않아 워치에서 얻을 수 없는 피처로 판단해 드롭했다.
+또한 rpoint CSV가 받아진 ~89명으로 학습셋이 줄어 정확도 측정 자체가 불가능했다.
+코드가 필요하면 커밋 `1e042ec1` 이전에서 복구할 수 있다.
 
 ---
 
 ## 실행
 
+### 개발 환경 (venv 2개)
+
+secretflow가 Windows를 지원하지 않아 환경을 둘로 나눠 쓴다. 용도가 겹치지 않으니
+둘 다 유지해야 한다.
+
+| 환경 | 파이썬 | 용도 |
+|---|---|---|
+| `venv_win/` | 3.10 (Windows) | 기본 개발 환경 — `main.py`, `app/`, `experiments/` 전부 (jax 0.6.2 / torch / tenseal / fastapi) |
+| `venv_wsl/` | 3.10 (WSL2) | `mpc/` 전용 — secretflow 1.13 + ray + jax 0.4.26 (구버전 jax 고정이라 분리) |
+
 ```bash
-pip install torch tenseal numpy pandas scikit-learn
+# Windows
+venv_win\Scriptsctivate
+pip install -r requirements.txt
+
+# WSL2 (SPU/MPC 실험에만 필요)
+source venv_wsl/bin/activate
 ```
 
 ### 학습
@@ -275,14 +345,14 @@ python main.py --mode distributed --dp-sigma 0.005
 ```bash
 # Watch 컴퓨터에서
 pip install requests tenseal
-python client_gui.py
+python -m app.client_gui
 ```
 
-`client_gui.py` 상단의 `HOSPITAL_URLS`를 병원 서버가 실행 중인 컴퓨터의 IP:포트로 맞춘 뒤 실행한다.
+`app/client_gui.py` 상단의 `HOSPITAL_URLS`를 병원 서버가 실행 중인 컴퓨터의 IP:포트로 맞춘 뒤 실행한다.
 GUI에서 값 입력 → "Generate CKKS Keys" → "Encrypt & Preview" → "Send to Hospitals" 순서로 클릭하면 끝.
 
 ```
-[client_gui.py]                              [병원 컴퓨터]
+[app/client_gui.py]                              [병원 컴퓨터]
   feature 입력
   CKKS 키 생성 (secret key 보유)
   POST /compute_logit_share ───────────────▶  :8001  hospital_A
@@ -298,9 +368,9 @@ GUI에서 값 입력 → "Generate CKKS Keys" → "Encrypt & Preview" → "Send 
 pip install fastapi uvicorn
 
 # 터미널 3개에서 각각 실행
-HOSPITAL_ID=0 uvicorn hospital_app:app --port 8001
-HOSPITAL_ID=1 uvicorn hospital_app:app --port 8002
-HOSPITAL_ID=2 uvicorn hospital_app:app --port 8003
+HOSPITAL_ID=0 uvicorn app.hospital_app:app --port 8001
+HOSPITAL_ID=1 uvicorn app.hospital_app:app --port 8002
+HOSPITAL_ID=2 uvicorn app.hospital_app:app --port 8003
 ```
 
 ```bash
