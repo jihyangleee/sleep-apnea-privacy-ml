@@ -1,5 +1,6 @@
 import argparse
 import random
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,7 +10,10 @@ from sklearn.preprocessing import StandardScaler
 from dataset import generate_galaxy_watch_users
 from simulate import run_distributed_simulation, SLEEP_FEATURE_GROUPS
 from he_client import build_he_context
-from model import HospitalModel
+from model import HospitalModel, LinearHospitalModel
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")   # cp949 콘솔에서 한글/특수문자 출력 오류 방지
 
 MODEL_PATH = "vertical_model.pt"
 
@@ -21,38 +25,56 @@ ENTRY_LABELS = ["Hospital A", "Hospital B", "Hospital C"]
 def run_distributed_fl(
     csv_path: str,
     dp_sigma: float = 0.01,
+    model_type: str = "linear",
+    n_epochs: int = 30,
 ):
-    """Fully distributed VFL training — single linear top-model, no Beaver Triple."""
+    """Fully distributed VFL training — no Beaver Triple for the linear/sub-model part.
+
+    model_type "linear": vertical logistic regression (default).
+    model_type "mlp"   : sub-model MLP + shared linear top.
+    """
     hospitals, shared_W, scaler = run_distributed_simulation(
-        csv_path, n_epochs=30, dp_sigma=dp_sigma
+        csv_path, n_epochs=n_epochs, dp_sigma=dp_sigma, model_type=model_type
     )
 
-    emb_dim = hospitals[0].emb_dim
+    ckpt = {
+        "mode":           "distributed",
+        "model_type":     model_type,
+        "feature_groups": SLEEP_FEATURE_GROUPS,
+        "emb_dim":        hospitals[0].emb_dim,
+        "scaler_mean":    scaler.mean_.tolist(),
+        "scaler_scale":   scaler.scale_.tolist(),
+    }
+    for i, h in enumerate(hospitals):
+        ckpt[f"sub_{i}"] = h.sub.state_dict()
+    if model_type == "linear":
+        ckpt["bias"] = hospitals[0].bias.detach().clone()
+    else:
+        ckpt["top_W"] = shared_W.state_dict()
 
-    torch.save(
-        {
-            "mode":           "distributed",
-            "feature_groups": SLEEP_FEATURE_GROUPS,
-            "emb_dim":        emb_dim,
-            "sub_0":          hospitals[0].sub.state_dict(),
-            "sub_1":          hospitals[1].sub.state_dict(),
-            "sub_2":          hospitals[2].sub.state_dict(),
-            "top_W":          shared_W.state_dict(),
-            "scaler_mean":    scaler.mean_.tolist(),
-            "scaler_scale":   scaler.scale_.tolist(),
-        },
-        MODEL_PATH,
-    )
-    print(f"[Distributed FL] model saved -> {MODEL_PATH}")
+    torch.save(ckpt, MODEL_PATH)
+    print(f"[Distributed FL] model saved -> {MODEL_PATH} (model_type={model_type})")
 
 
 # ── HE Inference ──────────────────────────────────────────────────────────────
 
 def _load_hospitals_for_he(ckpt: dict):
-    """Reconstruct HospitalModel list and set per-hospital HE weight slices."""
+    """Reconstruct the hospital list and set per-hospital HE weight slices."""
     feature_groups = ckpt["feature_groups"]
-    emb_dim        = ckpt["emb_dim"]
-    total_emb      = emb_dim * len(feature_groups)
+    model_type     = ckpt.get("model_type", "mlp")   # old checkpoints predate model_type
+
+    if model_type == "linear":
+        hospitals = [LinearHospitalModel(i, feature_groups) for i in range(len(feature_groups))]
+        for i, h in enumerate(hospitals):
+            h.sub.load_state_dict(ckpt[f"sub_{i}"])
+            h.eval()
+        b_top = ckpt["bias"].detach().numpy()          # (1,)
+        for h in hospitals:
+            h.build_he_weights(b_top)
+        return hospitals
+
+    emb_dim   = ckpt["emb_dim"]
+    total_emb = emb_dim * len(feature_groups)
 
     shared_W = nn.Linear(total_emb, 1)
     shared_W.load_state_dict(ckpt["top_W"])
@@ -75,6 +97,18 @@ def _load_hospitals_for_he(ckpt: dict):
         h.build_he_weights(W_top_i, b_top)
 
     return hospitals
+
+
+def _plain_logit(hospitals, ckpt: dict, x: np.ndarray) -> float:
+    """Plaintext reference logit for one standardized sample."""
+    with torch.no_grad():
+        embs = [
+            h.local_emb(torch.tensor(x[h.feature_groups[h.id]], dtype=torch.float32).unsqueeze(0))
+            for h in hospitals
+        ]
+        if ckpt.get("model_type", "mlp") == "linear":
+            return float(sum(embs).item() + ckpt["bias"].item())
+        return hospitals[0].top_W(torch.cat(embs, dim=1)).item()
 
 
 def run_he_infer():
@@ -110,20 +144,12 @@ def run_he_infer():
     patient_ctx  = build_he_context()
     hospital_ctx = ts.context_from(patient_ctx.serialize(save_secret_key=False))
 
-    print("[HE Inference] 워치 → 병원별 partial feature 암호화, 단일 linear top-model\n")
+    print(f"[HE Inference] 워치 → 병원별 partial feature 암호화 (model_type={ckpt.get('model_type', 'mlp')})\n")
 
     for idx, (x, name) in enumerate(zip(X_gw, profile_names)):
         # Plaintext reference
-        with torch.no_grad():
-            local_embs  = [
-                hospitals[i].sub(
-                    torch.tensor(x[hospitals[i].feature_groups[i]], dtype=torch.float32).unsqueeze(0)
-                )
-                for i in range(len(hospitals))
-            ]
-            cat_emb     = torch.cat(local_embs, dim=1)
-            plain_logit = hospitals[0].top_W(cat_emb).item()
-            plain_prob  = float(1.0 / (1.0 + np.exp(-plain_logit)))
+        plain_logit = _plain_logit(hospitals, ckpt, x)
+        plain_prob  = float(1.0 / (1.0 + np.exp(-plain_logit)))
 
         # Watch encrypts each hospital's feature slice (zero-padded to power-of-2)
         all_enc_xi = {}
@@ -166,11 +192,18 @@ if __name__ == "__main__":
         default=0.01,
         help="DP noise sigma (default 0.01; 0 = 비활성화)",
     )
+    parser.add_argument(
+        "--model",
+        choices=["linear", "mlp"],
+        default="linear",
+        help="linear: 수직 로지스틱 회귀 (default) | mlp: sub-model MLP + linear top",
+    )
+    parser.add_argument("--epochs", type=int, default=30, help="학습 epoch 수 (default 30)")
     args = parser.parse_args()
 
     if args.mode == "distributed":
         if args.csv is None:
             parser.error("--mode distributed 에는 --csv 가 필수입니다.")
-        run_distributed_fl(args.csv, dp_sigma=args.dp_sigma)
+        run_distributed_fl(args.csv, dp_sigma=args.dp_sigma, model_type=args.model, n_epochs=args.epochs)
     elif args.mode == "he-infer":
         run_he_infer()

@@ -248,3 +248,94 @@ class HospitalModel(nn.Module):
         vec.link_context(ctx)
         logit = vec.decrypt()[0]
         return float(1.0 / (1.0 + np.exp(-logit)))
+
+
+class LinearHospitalModel(nn.Module):
+    """Vertical logistic-regression hospital: own feature slice -> logit share.
+
+    No sub-model MLP, no PolyActivation. Hospital i holds w_i (n_i -> 1) and
+    computes logit_share_i = w_i . x_i locally; the global logit is
+    sum_i logit_share_i + b (b lives on hospital 0). This is the standard
+    vertically-partitioned logistic regression: it needs no HE level for an
+    activation (CKKS inference is a single plaintext-matrix multiply per
+    hospital), and the MPC/SPU boundary is unchanged (sum -> sigmoid approx ->
+    MSE -> grad).
+
+    Chosen because the plaintext comparison (experiments/architecture/
+    compare_model_families.py) found no accuracy gain from the sub-model MLP
+    over logistic regression on the 8/12/13-feature sets.
+
+    Interface mirrors HospitalModel where simulate.py / main.py touch it:
+    .id, .feature_groups, .sub (parameters), local_emb(), logit_share().
+    """
+
+    def __init__(self, hospital_id: int, feature_groups: list):
+        super().__init__()
+        self.id             = hospital_id
+        self.feature_groups = [list(fg) for fg in feature_groups]
+        self.n              = len(feature_groups)
+        self.n_features     = sum(len(fg) for fg in feature_groups)
+        self.emb_dim        = 1
+
+        self.sub  = nn.Linear(len(feature_groups[hospital_id]), 1, bias=False)
+        # global bias is stored once (hospital 0), like HospitalModel's shared top bias
+        self.bias = nn.Parameter(torch.zeros(1)) if hospital_id == 0 else None
+
+        self._he_built = False
+
+    # ── Training helpers ──────────────────────────────────────────────────────
+
+    def local_emb(self, x_local: torch.Tensor) -> torch.Tensor:
+        """w_i . x_i, shape (batch, 1). Plaintext, stays local (already a logit share)."""
+        return self.sub(x_local)
+
+    def logit_share(self, local_embedding: torch.Tensor, is_first: bool) -> torch.Tensor:
+        """Additive share of the logit; the bias is added by exactly one hospital."""
+        if is_first:
+            return local_embedding + self.bias
+        return local_embedding
+
+    # ── Inference helpers (CKKS) ──────────────────────────────────────────────
+
+    def build_he_weights(self, b_top: "np.ndarray | None" = None):
+        """Pre-compute the weight list for CKKS inference (zero-pad to power-of-2)."""
+        import numpy as np
+
+        w      = self.sub.weight.detach().numpy()           # (1, n_i)
+        n_feat = w.shape[1]
+        pad_to = max(1 << (n_feat - 1).bit_length(), 4)
+        w_pad  = np.zeros((1, pad_to), dtype=np.float64)
+        w_pad[:, :n_feat] = w
+        self._W_T   = w_pad.T.tolist()                      # (pad_to, 1)
+        self._b_top = b_top.astype(np.float64).tolist() if b_top is not None else None
+        self._he_built = True
+
+    def compute_logit_share_he(self, enc_xi_bytes: bytes, ctx) -> bytes:
+        """enc(features_i) -> enc(logit_i). One plaintext matmul, no activation."""
+        import tenseal as ts
+        assert self._he_built, "call build_he_weights() after loading model"
+
+        enc = ts.lazy_ckks_vector_from(enc_xi_bytes)
+        enc.link_context(ctx)
+        enc.mm_(self._W_T)
+        return enc.serialize()
+
+    def run_he_inference(self, all_enc_xi: dict, ctx, other_hospitals: list) -> bytes:
+        """Fully distributed CKKS inference (simulation — all hospitals in one process).
+
+        Each hospital: enc(x_i) -> enc(logit_i); this hospital sums them and adds
+        the bias; the patient decrypts enc(logit) and applies sigmoid.
+        """
+        import tenseal as ts
+        assert self._he_built
+
+        all_hospitals = sorted([self] + other_hospitals, key=lambda h: h.id)
+        enc_logit = None
+        for h in all_hospitals:
+            enc_l = ts.lazy_ckks_vector_from(h.compute_logit_share_he(all_enc_xi[h.id], ctx))
+            enc_l.link_context(ctx)
+            enc_logit = enc_l if enc_logit is None else enc_logit + enc_l
+
+        if self._b_top is not None:
+            enc_logit += self._b_top
+        return enc_logit.serialize()

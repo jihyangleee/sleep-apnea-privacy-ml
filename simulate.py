@@ -4,19 +4,20 @@ import torch
 import torch.nn as nn
 
 from dataset import load_shhs_data, partition_data_vertical
-from model import HospitalModel
+from model import HospitalModel, LinearHospitalModel
 from secret_sharing import additive_split, BeaverProvider
 
 NUM_CLIENTS = 3
 
+# 인덱스는 dataset.MODEL_FEATURES 순서 (12개 + desat 3개 = 15)
 SLEEP_FEATURE_GROUPS = [
-    [0, 1],            # client A — 심박·산소 모니터링: SpO2(avgsao2), avg HR(avg_hr)
+    [0, 1, 12, 13, 14],  # client A — 심박·산소 모니터링: SpO2(avgsat), avg HR(avg_hr), odi, desat 지속시간·깊이
     [2, 3, 4, 8, 9],   # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio, waso, sleep_latency
     [5, 6, 7, 10, 11], # client C — 병원/클리닉: age, sex, BMI, neck20, ess_s1
 ]
 
 SLEEP_CLIENT_LABELS = [
-    "심박·산소 모니터링(SpO2, avg HR)",
+    "심박·산소 모니터링(SpO2, avg HR, odi, mean_desat_duration, mean_desat_drop)",
     "수면검사실(total sleep, efficiency, deep ratio, waso, sleep_latency)",
     "병원(age, sex, BMI, neck20, ess_s1) + label",
 ]
@@ -28,6 +29,7 @@ def run_distributed_simulation(
     batch_size: int = 32,
     dp_sigma: float = 0.01,
     emb_dim: int = 16,
+    model_type: str = "linear",
 ):
     """Fully distributed VFL training — no central server sees any embedding.
 
@@ -47,8 +49,16 @@ def run_distributed_simulation(
       shares support natively; BCE's gradient needs division, which would
       require a secure-division protocol on top of Beaver Triple.
 
+    model_type
+    ----------
+    "linear" : vertical logistic regression (LinearHospitalModel) — each hospital
+               holds one Linear(n_i -> 1); no sub-model, no PolyActivation.
+               shared_W is None (the bias lives on hospital 0).
+    "mlp"    : sub-model MLP + shared linear top (HospitalModel).
+
     Returns: (hospitals, shared_W, scaler)
     """
+    assert model_type in ("linear", "mlp"), model_type
     # ── Data loading — real SHHS-1 CSV only ─────────────────────────────────────
     print("[Distributed FL] SHHS 데이터 로드")
     t_data_start = time.perf_counter()
@@ -63,16 +73,22 @@ def run_distributed_simulation(
     for i, label in enumerate(SLEEP_CLIENT_LABELS):
         print(f"  hospital {i}: {label}")
     print(f"  DP sigma={dp_sigma}  (embedding gradient에 Gaussian noise, label 추론 방지)")
-    print(f"  Top-model: 단일 linear — 병원별 column-slice를 로컬 임베딩에 적용, 통신 없음")
+    if model_type == "linear":
+        print(f"  Model: 수직 로지스틱 회귀 — 병원별 Linear(n_i→1), logit = Σ w_i·x_i + b")
+    else:
+        print(f"  Top-model: 단일 linear — 병원별 column-slice를 로컬 임베딩에 적용, 통신 없음")
 
     # ── Build hospitals with SHARED single top-model ──────────────────────────
-    total_emb = emb_dim * NUM_CLIENTS
-    shared_W  = nn.Linear(total_emb, 1)
-
-    hospitals = [
-        HospitalModel(i, SLEEP_FEATURE_GROUPS, emb_dim, shared_W)
-        for i in range(NUM_CLIENTS)
-    ]
+    if model_type == "linear":
+        shared_W  = None
+        hospitals = [LinearHospitalModel(i, SLEEP_FEATURE_GROUPS) for i in range(NUM_CLIENTS)]
+    else:
+        total_emb = emb_dim * NUM_CLIENTS
+        shared_W  = nn.Linear(total_emb, 1)
+        hospitals = [
+            HospitalModel(i, SLEEP_FEATURE_GROUPS, emb_dim, shared_W)
+            for i in range(NUM_CLIENTS)
+        ]
 
     # ── Data tensors per hospital ─────────────────────────────────────────────
     X_trains = [
@@ -91,7 +107,10 @@ def run_distributed_simulation(
     params = []
     for h in hospitals:
         params.extend(h.sub.parameters())
-    params.extend(shared_W.parameters())
+    if shared_W is not None:
+        params.extend(shared_W.parameters())
+    else:
+        params.append(hospitals[0].bias)
     optimizer = torch.optim.Adam(params, lr=1e-3)
     beaver    = BeaverProvider(NUM_CLIENTS)
 
@@ -172,11 +191,14 @@ def run_distributed_simulation(
 
         if epoch % 5 == 0 or epoch == 1:
             with torch.no_grad():
-                test_embs = torch.cat(
-                    [hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)],
-                    dim=1,
-                )
-                logit = shared_W(test_embs)
+                if shared_W is None:
+                    logit = sum(hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)) + hospitals[0].bias
+                else:
+                    test_embs = torch.cat(
+                        [hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)],
+                        dim=1,
+                    )
+                    logit = shared_W(test_embs)
                 pred  = (logit.squeeze() > 0).float()
                 acc   = (pred == y_test).float().mean().item()
             print(
