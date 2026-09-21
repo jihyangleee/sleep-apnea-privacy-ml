@@ -258,6 +258,7 @@ def _run_training(csv_path, dp_sigma=0.01, n_epochs=30):
         hospitals_tr, W, scaler = run_distributed_simulation(   # 세 병원의 분산(수직) 학습 시뮬레이션 실행
             csv_path=csv_path,
             n_epochs=n_epochs, dp_sigma=dp_sigma,
+            model_type="mlp",   # 이 서버(_load_model / compute_logit_share)는 MLP 체크포인트만 지원한다
         )
         torch.save(
             {

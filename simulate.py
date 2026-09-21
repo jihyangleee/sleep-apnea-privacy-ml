@@ -23,6 +23,25 @@ SLEEP_CLIENT_LABELS = [
 ]
 
 
+def save_checkpoint(path, hospitals, shared_W, scaler, model_type):
+    """학습 결과를 he-infer/서버가 읽는 형식으로 저장 (자체 시뮬레이션·SPU 경로 공용)."""
+    ckpt = {
+        "mode":           "distributed",
+        "model_type":     model_type,
+        "feature_groups": SLEEP_FEATURE_GROUPS,
+        "emb_dim":        hospitals[0].emb_dim,
+        "scaler_mean":    scaler.mean_.tolist(),
+        "scaler_scale":   scaler.scale_.tolist(),
+    }
+    for i, h in enumerate(hospitals):
+        ckpt[f"sub_{i}"] = h.sub.state_dict()
+    if model_type == "linear":
+        ckpt["bias"] = hospitals[0].bias.detach().clone()
+    else:
+        ckpt["top_W"] = shared_W.state_dict()
+    torch.save(ckpt, path)
+
+
 def run_distributed_simulation(
     csv_path: str,
     n_epochs: int = 30,

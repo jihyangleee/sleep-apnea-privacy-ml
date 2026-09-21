@@ -1,4 +1,4 @@
-"""Plaintext comparison on the 8 / 12 (deployed) / 13 (desat) feature sets:
+"""Plaintext comparison on the 8 / 13 (desat) / 15 (deployed) feature sets:
 logistic regression vs. 2nd-order logistic regression vs. low-degree polynomial
 MLPs vs. gradient boosting (upper bound only -- not MPC/CKKS friendly).
 
@@ -103,7 +103,7 @@ MODELS = ["logreg", "logreg_poly2", "mlp_local", "mlp_top", "hist_gbdt (upper bo
 # name -> (loader returning X, y; hospital feature-index groups)
 CONFIGS = {
     "8feat":  (lambda: load_with_features(CSV_PATH, [])[:2], BASE_GROUPS),
-    "12feat": (lambda: load_shhs_data(CSV_PATH), SLEEP_FEATURE_GROUPS),  # deployed (dataset.py)
+    "15feat": (lambda: load_shhs_data(CSV_PATH), SLEEP_FEATURE_GROUPS),  # deployed: dataset.MODEL_FEATURES (12 + desat 3)
     "13feat": (lambda: load_combined(CSV_PATH, XML_DIR), DESAT_GROUPS),  # + desat, XML-matched subjects only
 }
 

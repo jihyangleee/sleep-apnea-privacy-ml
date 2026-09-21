@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+# logistic regression 부분은 LinearHospitalModel class 이다. 
 class PolyActivation(nn.Module):
     """HE-compatible cubic ReLU approximation: f(x) = 0.197x + 0.004x³.
 
@@ -253,34 +253,20 @@ class HospitalModel(nn.Module):
 class LinearHospitalModel(nn.Module):
     """Vertical logistic-regression hospital: own feature slice -> logit share.
 
-    No sub-model MLP, no PolyActivation. Hospital i holds w_i (n_i -> 1) and
-    computes logit_share_i = w_i . x_i locally; the global logit is
-    sum_i logit_share_i + b (b lives on hospital 0). This is the standard
-    vertically-partitioned logistic regression: it needs no HE level for an
-    activation (CKKS inference is a single plaintext-matrix multiply per
-    hospital), and the MPC/SPU boundary is unchanged (sum -> sigmoid approx ->
-    MSE -> grad).
-
-    Chosen because the plaintext comparison (experiments/architecture/
-    compare_model_families.py) found no accuracy gain from the sub-model MLP
-    over logistic regression on the 8/12/13-feature sets.
-
-    Interface mirrors HospitalModel where simulate.py / main.py touch it:
-    .id, .feature_groups, .sub (parameters), local_emb(), logit_share().
-    """
+"""
 
     def __init__(self, hospital_id: int, feature_groups: list):
         super().__init__()
-        self.id             = hospital_id
-        self.feature_groups = [list(fg) for fg in feature_groups]
+        self.id             = hospital_id # 해당 병원이 담당하는 특성 인덱스
+        self.feature_groups = [list(fg) for fg in feature_groups] # 해당 병원이 담당하는 특성 인덱스
         self.n              = len(feature_groups)
         self.n_features     = sum(len(fg) for fg in feature_groups)
         self.emb_dim        = 1
 
         self.sub  = nn.Linear(len(feature_groups[hospital_id]), 1, bias=False)
-        # global bias is stored once (hospital 0), like HospitalModel's shared top bias
+        # 병원 i가 가진 특성 5개에 대한 가중치 
         self.bias = nn.Parameter(torch.zeros(1)) if hospital_id == 0 else None
-
+        # 전체에서 병원0만 갖는다. , 병원 1과 2는 None이다. 
         self._he_built = False
 
     # ── Training helpers ──────────────────────────────────────────────────────
@@ -294,9 +280,11 @@ class LinearHospitalModel(nn.Module):
         if is_first:
             return local_embedding + self.bias
         return local_embedding
-
+    # 병원 0이면 bias를 더하고 나머지는 그대로 반환한다. bias를 정확히 한 번만 들어가게
+    # 하려는 것 
     # ── Inference helpers (CKKS) ──────────────────────────────────────────────
-
+    # 워치가 특성을 8칸으로 pad해서 암호화하므로 길이를 맞춰야 한다. 
+    # 스크립트가 워치 역할을 시뮬레이션 한다. 
     def build_he_weights(self, b_top: "np.ndarray | None" = None):
         """Pre-compute the weight list for CKKS inference (zero-pad to power-of-2)."""
         import numpy as np
@@ -309,17 +297,18 @@ class LinearHospitalModel(nn.Module):
         self._W_T   = w_pad.T.tolist()                      # (pad_to, 1)
         self._b_top = b_top.astype(np.float64).tolist() if b_top is not None else None
         self._he_built = True
-
+    # 병원 하나의 HE 계산 
     def compute_logit_share_he(self, enc_xi_bytes: bytes, ctx) -> bytes:
         """enc(features_i) -> enc(logit_i). One plaintext matmul, no activation."""
         import tenseal as ts
         assert self._he_built, "call build_he_weights() after loading model"
-
+        # 암호문 복원
         enc = ts.lazy_ckks_vector_from(enc_xi_bytes)
+        # 병원용 컨텍스트 (비밀키 없음)
         enc.link_context(ctx)
         enc.mm_(self._W_T)
         return enc.serialize()
-
+    # 여기서, 진입 병원이 전체를 조율함 
     def run_he_inference(self, all_enc_xi: dict, ctx, other_hospitals: list) -> bytes:
         """Fully distributed CKKS inference (simulation — all hospitals in one process).
 
@@ -331,11 +320,23 @@ class LinearHospitalModel(nn.Module):
 
         all_hospitals = sorted([self] + other_hospitals, key=lambda h: h.id)
         enc_logit = None
+        # 세 병원의 enc(logit_l) 합산
         for h in all_hospitals:
             enc_l = ts.lazy_ckks_vector_from(h.compute_logit_share_he(all_enc_xi[h.id], ctx))
             enc_l.link_context(ctx)
             enc_logit = enc_l if enc_logit is None else enc_logit + enc_l
-
+        # bias는 한번만 
         if self._b_top is not None:
             enc_logit += self._b_top
         return enc_logit.serialize()
+    # 워치 쪽 동작 -> 비밀키가 든 컨텍스트로 복호화하여 logit을 얻고 정확한 sigmoid를 씌워
+    # 확률로 만든다. 
+    @staticmethod
+    def decrypt_result(enc_bytes: bytes, ctx) -> float:
+        """Patient decrypts enc_logit -> sigmoid -> probability."""
+        import tenseal as ts
+        import numpy as np
+        vec = ts.lazy_ckks_vector_from(enc_bytes)
+        vec.link_context(ctx)
+        logit = vec.decrypt()[0]
+        return float(1.0 / (1.0 + np.exp(-logit)))
