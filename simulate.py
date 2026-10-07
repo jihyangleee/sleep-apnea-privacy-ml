@@ -1,44 +1,39 @@
 import random
 import time                                            # 학습 단계별 시간 오버헤드 측정용
 import torch
-import torch.nn as nn
 
 from dataset import load_shhs_data, partition_data_vertical
-from model import HospitalModel, LinearHospitalModel
+from model import LinearHospitalModel
 from secret_sharing import additive_split, BeaverProvider
 
 NUM_CLIENTS = 3
 
-# 인덱스는 dataset.MODEL_FEATURES 순서 (12개 + desat 3개 = 15)
+# 인덱스는 dataset.MODEL_FEATURES 순서 (11개 + desat 3개 = 14)
 SLEEP_FEATURE_GROUPS = [
-    [0, 1, 12, 13, 14],  # client A — 심박·산소 모니터링: SpO2(avgsat), avg HR(avg_hr), odi, desat 지속시간·깊이
-    [2, 3, 4, 8, 9],   # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio, waso, sleep_latency
-    [5, 6, 7, 10, 11], # client C — 병원/클리닉: age, sex, BMI, neck20, ess_s1
+    [0, 1, 11, 12, 13],  # client A — 심박·산소 모니터링: SpO2(avgsat), avg HR(avg_hr), odi, desat 지속시간·깊이
+    [2, 3, 4, 8],        # client B — 수면검사실(PSG): total sleep, efficiency, deep ratio, waso
+    [5, 6, 7, 9, 10],    # client C — 병원/클리닉: age, sex, BMI, neck20, ess_s1
 ]
 
 SLEEP_CLIENT_LABELS = [
     "심박·산소 모니터링(SpO2, avg HR, odi, mean_desat_duration, mean_desat_drop)",
-    "수면검사실(total sleep, efficiency, deep ratio, waso, sleep_latency)",
+    "수면검사실(total sleep, efficiency, deep ratio, waso)",
     "병원(age, sex, BMI, neck20, ess_s1) + label",
 ]
 
 
-def save_checkpoint(path, hospitals, shared_W, scaler, model_type):
-    """학습 결과를 he-infer/서버가 읽는 형식으로 저장 (자체 시뮬레이션·SPU 경로 공용)."""
+def save_checkpoint(path, hospitals, scaler):
+    """학습 결과를 he-infer가 읽는 형식으로 저장."""
     ckpt = {
         "mode":           "distributed",
-        "model_type":     model_type,
+        "model_type":     "linear",
         "feature_groups": SLEEP_FEATURE_GROUPS,
-        "emb_dim":        hospitals[0].emb_dim,
         "scaler_mean":    scaler.mean_.tolist(),
         "scaler_scale":   scaler.scale_.tolist(),
+        "bias":           hospitals[0].bias.detach().clone(),
     }
     for i, h in enumerate(hospitals):
         ckpt[f"sub_{i}"] = h.sub.state_dict()
-    if model_type == "linear":
-        ckpt["bias"] = hospitals[0].bias.detach().clone()
-    else:
-        ckpt["top_W"] = shared_W.state_dict()
     torch.save(ckpt, path)
 
 
@@ -47,19 +42,16 @@ def run_distributed_simulation(
     n_epochs: int = 30,
     batch_size: int = 32,
     dp_sigma: float = 0.01,
-    emb_dim: int = 16,
-    model_type: str = "linear",
 ):
     """Fully distributed VFL training — no central server sees any embedding.
 
+    Model: vertical logistic regression (LinearHospitalModel) — each hospital
+    holds one Linear(n_i -> 1); the bias lives on hospital 0.
+
     Privacy model
     -------------
-    - Sub-model runs locally on each hospital (private features never shared).
-    - Embeddings never leave the hospital that computed them — each hospital
-      applies its own W_top column-slice to its own local embedding directly,
-      so no embedding secret-sharing or cross-hospital transmission happens.
-    - The resulting per-hospital logit is already an additive share of the
-      true logit (block-linearity of W_top over the concatenation); Beaver
+    - w_i . x_i runs locally on each hospital (private features never shared).
+    - The per-hospital logit is already an additive share of the true logit; Beaver
       Triple is used only to secure the nonlinear sigmoid computed over
       these shares, so no party ever reconstructs the raw logit.
     - Labels are additively secret-shared too — no single "label holder"
@@ -68,16 +60,8 @@ def run_distributed_simulation(
       shares support natively; BCE's gradient needs division, which would
       require a secure-division protocol on top of Beaver Triple.
 
-    model_type
-    ----------
-    "linear" : vertical logistic regression (LinearHospitalModel) — each hospital
-               holds one Linear(n_i -> 1); no sub-model, no PolyActivation.
-               shared_W is None (the bias lives on hospital 0).
-    "mlp"    : sub-model MLP + shared linear top (HospitalModel).
-
-    Returns: (hospitals, shared_W, scaler)
+    Returns: (hospitals, scaler)
     """
-    assert model_type in ("linear", "mlp"), model_type
     # ── Data loading — real SHHS-1 CSV only ─────────────────────────────────────
     print("[Distributed FL] SHHS 데이터 로드")
     t_data_start = time.perf_counter()
@@ -92,22 +76,9 @@ def run_distributed_simulation(
     for i, label in enumerate(SLEEP_CLIENT_LABELS):
         print(f"  hospital {i}: {label}")
     print(f"  DP sigma={dp_sigma}  (embedding gradient에 Gaussian noise, label 추론 방지)")
-    if model_type == "linear":
-        print(f"  Model: 수직 로지스틱 회귀 — 병원별 Linear(n_i→1), logit = Σ w_i·x_i + b")
-    else:
-        print(f"  Top-model: 단일 linear — 병원별 column-slice를 로컬 임베딩에 적용, 통신 없음")
+    print(f"  Model: 수직 로지스틱 회귀 — 병원별 Linear(n_i→1), logit = Σ w_i·x_i + b")
 
-    # ── Build hospitals with SHARED single top-model ──────────────────────────
-    if model_type == "linear":
-        shared_W  = None
-        hospitals = [LinearHospitalModel(i, SLEEP_FEATURE_GROUPS) for i in range(NUM_CLIENTS)]
-    else:
-        total_emb = emb_dim * NUM_CLIENTS
-        shared_W  = nn.Linear(total_emb, 1)
-        hospitals = [
-            HospitalModel(i, SLEEP_FEATURE_GROUPS, emb_dim, shared_W)
-            for i in range(NUM_CLIENTS)
-        ]
+    hospitals = [LinearHospitalModel(i, SLEEP_FEATURE_GROUPS) for i in range(NUM_CLIENTS)]
 
     # ── Data tensors per hospital ─────────────────────────────────────────────
     X_trains = [
@@ -122,14 +93,11 @@ def run_distributed_simulation(
     y_test  = torch.tensor(y_test_raw,  dtype=torch.float32)
     n = len(y_train)
 
-    # ── Optimizer: all sub-models + shared top linear ─────────────────────────
+    # ── Optimizer: all hospital weights + bias ────────────────────────────────
     params = []
     for h in hospitals:
         params.extend(h.sub.parameters())
-    if shared_W is not None:
-        params.extend(shared_W.parameters())
-    else:
-        params.append(hospitals[0].bias)
+    params.append(hospitals[0].bias)
     optimizer = torch.optim.Adam(params, lr=1e-3)
     beaver    = BeaverProvider(NUM_CLIENTS)
 
@@ -158,10 +126,11 @@ def run_distributed_simulation(
             local_embs = [
                 hospitals[i].local_emb(X_trains[i][idx]) for i in range(NUM_CLIENTS)
             ]
-
+            # 병원별 local_emb로 w_i * x_i
             # DP on gradients: prevents label inference from gradient sign/magnitude
             if dp_sigma > 0:
                 for emb in local_embs:
+                    # ** register_hook으로 역전파될 때 노이즈를 더함
                     emb.register_hook(lambda g: g + torch.randn_like(g) * dp_sigma)
             step_ms["local_emb"] += (time.perf_counter() - t0) * 1000
 
@@ -173,14 +142,18 @@ def run_distributed_simulation(
                 hospitals[j].logit_share(local_embs[j], j == 0)
                 for j in range(NUM_CLIENTS)
             ]
+            # bias 는 병원 0만 더함  
             step_ms["top_layer"] += (time.perf_counter() - t0) * 1000
 
             # Step 3: Beaver Triple sigmoid — σ(logit) ≈ 0.5 + 0.197x - 0.004x³
             # logit stays in share form; no party reconstructs the raw logit.
             # x³ needs 2 multiplications → 2 triples.
+            # share 를 합차지 않고 글대로 넘김
             t0 = time.perf_counter()
             triple1 = beaver.generate_triple(logit_shares[0].shape)
             triple2 = beaver.generate_triple(logit_shares[0].shape)
+
+            # sigmoid approx 
             pred_shares = beaver.sigmoid_approx(logit_shares, triple1, triple2)
             step_ms["beaver_sigmoid"] += (time.perf_counter() - t0) * 1000
 
@@ -189,6 +162,7 @@ def run_distributed_simulation(
             # (pred_share_i - y_share_i) reconstructs exactly pred - y without
             # needing a division protocol the way BCE's gradient would.
             t0 = time.perf_counter()
+            # 라벨도  additive_split으로 쪼개고 pred_share - y_shre 를 합침
             y_shares    = additive_split(y_batch.unsqueeze(1), n=NUM_CLIENTS)
             diff_shares = [pred_shares[i] - y_shares[i] for i in range(NUM_CLIENTS)]
             diff        = sum(diff_shares)
@@ -210,14 +184,7 @@ def run_distributed_simulation(
 
         if epoch % 5 == 0 or epoch == 1:
             with torch.no_grad():
-                if shared_W is None:
-                    logit = sum(hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)) + hospitals[0].bias
-                else:
-                    test_embs = torch.cat(
-                        [hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)],
-                        dim=1,
-                    )
-                    logit = shared_W(test_embs)
+                logit = sum(hospitals[i].local_emb(X_tests[i]) for i in range(NUM_CLIENTS)) + hospitals[0].bias
                 pred  = (logit.squeeze() > 0).float()
                 acc   = (pred == y_test).float().mean().item()
             print(
@@ -230,4 +197,4 @@ def run_distributed_simulation(
 
     train_total_s = time.perf_counter() - t_train_start
     print(f"[Distributed FL] 학습 완료 — 총 {train_total_s:.1f}s ({n_epochs} epochs)")
-    return hospitals, shared_W, scaler
+    return hospitals, scaler

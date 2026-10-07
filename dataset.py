@@ -15,7 +15,6 @@ SHHS_FEATURES = [
     "bmi_s1",     # BMI
     # feature 확장 실험 (워치/앱으로 수집 가능한 SHHS 변수만 선정)
     "waso",           # wake after sleep onset (분) — actigraphy로 워치가 추정 가능
-    "sleep_latency",  # 값이 0/1만 관측됨 — 연속 잠복시간이 아니라 이진 지표로 보임, 원본 그대로 사용
     "neck20",         # 목둘레 — 앱 1회 수동 입력
     "ess_s1",         # Epworth 졸림 점수 — 앱 온보딩 설문(자기보고)
 ]
@@ -29,7 +28,7 @@ AHI_THRESHOLD = 15  # 중등도 이상 수면무호흡
 # 라벨(AHI)을 그대로 재구성하게 되므로 일부러 제외했다.
 SHHS_DESAT_FEATURES = ["odi", "mean_desat_duration", "mean_desat_drop"]
 # 학습·추론에 실제로 쓰는 전체 피처 순서 (모델 입력 = 이 순서)
-MODEL_FEATURES = SHHS_FEATURES + SHHS_DESAT_FEATURES   # 12 + 3 = 15
+MODEL_FEATURES = SHHS_FEATURES + SHHS_DESAT_FEATURES   # 11 + 3 = 14
 DEFAULT_XML_DIR    = "shhs/polysomnography/annotations-events-nsrr/shhs1"
 DESAT_CACHE_CSV    = "shhs/datasets/desat_features_all.csv"  # XML 파싱(~12초) 결과 캐시
 
@@ -61,8 +60,8 @@ def _load_desat_features(xml_dir: str, cache_csv: str = DESAT_CACHE_CSV) -> pd.D
 def load_shhs_data(csv_path: str, return_scaler: bool = False, xml_dir: str = DEFAULT_XML_DIR):
     """NSRR SHHS-1 CSV + 이벤트 주석 XML 로드 → (X, y) 반환.
 
-    X — (n_samples, 15) float32, StandardScaler 정규화. 열 순서는 MODEL_FEATURES
-        (CSV 12개 + desat 3개). XML이 내려받아진 참가자만 남는다(inner join).
+    X — (n_samples, 14) float32, StandardScaler 정규화. 열 순서는 MODEL_FEATURES
+        (CSV 11개 + desat 3개). XML이 내려받아진 참가자만 남는다(inner join).
     y — (n_samples,)   float32, 0=정상 / 1=수면무호흡(AHI≥15)
     return_scaler=True 시 (X, y, scaler) 반환
     """
@@ -91,13 +90,13 @@ def load_shhs_data(csv_path: str, return_scaler: bool = False, xml_dir: str = DE
 # 갤럭시 워치 사용자 합성 프로파일 (원시 단위값, 정규화 전) <-- 더미 값
 # feature 순서 = MODEL_FEATURES:
 #   avgsat, avg_hr, slpprdp, slpeffp, times34p, age_s1, gender, bmi_s1,
-#   waso, sleep_latency, neck20, ess_s1, odi, mean_desat_duration, mean_desat_drop
+#   waso, neck20, ess_s1, odi, mean_desat_duration, mean_desat_drop
 _GALAXY_WATCH_PROFILES = [
-    {"name": "고위험 | 54세 남성 | 비만·저산소",        "raw": [91.0, 74.0, 310.0, 73.0,  9.0, 54.0, 1.0, 33.5, 75.0, 1.0, 43.0, 13.0, 38.0, 26.0, 5.5]},
-    {"name": "중위험 | 44세 남성 | 과체중",              "raw": [94.0, 68.0, 355.0, 81.0, 13.0, 44.0, 1.0, 27.5, 45.0, 0.0, 39.0,  9.0, 16.0, 22.0, 3.0]},
-    {"name": "저위험 | 32세 여성 | 정상",                "raw": [97.0, 61.0, 425.0, 91.0, 21.0, 32.0, 2.0, 21.5, 20.0, 0.0, 32.0,  5.0,  3.0, 18.0, 1.8]},
-    {"name": "고위험 | 61세 남성 | 고도비만·심한 저산소", "raw": [88.0, 79.0, 275.0, 69.0,  7.0, 61.0, 1.0, 36.0, 90.0, 1.0, 45.0, 16.0, 52.0, 30.0, 7.5]},
-    {"name": "저위험 | 28세 여성 | 활동적",              "raw": [96.5, 57.0, 450.0, 93.0, 23.0, 28.0, 2.0, 20.5, 15.0, 0.0, 31.0,  4.0,  2.0, 17.0, 1.5]},
+    {"name": "고위험 | 54세 남성 | 비만·저산소",        "raw": [91.0, 74.0, 310.0, 73.0,  9.0, 54.0, 1.0, 33.5, 75.0, 43.0, 13.0, 38.0, 26.0, 5.5]},
+    {"name": "중위험 | 44세 남성 | 과체중",              "raw": [94.0, 68.0, 355.0, 81.0, 13.0, 44.0, 1.0, 27.5, 45.0, 39.0,  9.0, 16.0, 22.0, 3.0]},
+    {"name": "저위험 | 32세 여성 | 정상",                "raw": [97.0, 61.0, 425.0, 91.0, 21.0, 32.0, 2.0, 21.5, 20.0, 32.0,  5.0,  3.0, 18.0, 1.8]},
+    {"name": "고위험 | 61세 남성 | 고도비만·심한 저산소", "raw": [88.0, 79.0, 275.0, 69.0,  7.0, 61.0, 1.0, 36.0, 90.0, 45.0, 16.0, 52.0, 30.0, 7.5]},
+    {"name": "저위험 | 28세 여성 | 활동적",              "raw": [96.5, 57.0, 450.0, 93.0, 23.0, 28.0, 2.0, 20.5, 15.0, 31.0,  4.0,  2.0, 17.0, 1.5]},
 ]
 
 
@@ -105,7 +104,7 @@ def generate_galaxy_watch_users():
     """갤럭시 워치 사용자 합성 프로파일 5명 반환 (정규화 전 원시값).
 
     반환:
-        raw_X  — (5, 15) float32, 정규화 전 원시 단위값
+        raw_X  — (5, 14) float32, 정규화 전 원시 단위값
         names  — list[str], 프로파일 설명
     """
     raw_X = np.array([p["raw"] for p in _GALAXY_WATCH_PROFILES], dtype=np.float32)

@@ -31,11 +31,11 @@ def run_distributed_fl(
     n_epochs: int = 30,
 ):
     """Fully distributed VFL training — vertical logistic regression, no Beaver Triple for the linear part."""
-    hospitals, shared_W, scaler = run_distributed_simulation(
-        csv_path, n_epochs=n_epochs, dp_sigma=dp_sigma, model_type="linear"
+    hospitals, scaler = run_distributed_simulation(
+        csv_path, n_epochs=n_epochs, dp_sigma=dp_sigma
     )
 
-    save_checkpoint(MODEL_PATH, hospitals, shared_W, scaler, "linear")
+    save_checkpoint(MODEL_PATH, hospitals, scaler)
     print(f"[Distributed FL] model saved -> {MODEL_PATH}")
 
 
@@ -136,7 +136,7 @@ def run_he_infer(model_path: str = MODEL_PATH):
         # 진입 병원을 랜덤 선택
         entry_id = random.randrange(len(hospitals))
         others   = [h for h in hospitals if h.id != entry_id]
-        # 추론 단계에서는 각 병우너이 enc(logit_h)를 계산한 후 
+        # 추론 단계에서는 각 병원이 enc(logit_h)를 계산한 후 
         # 진입 병원이 세 개를 더하고 bias를 더한다. enc(z)를 직렬화해 반환 
         enc_result = hospitals[entry_id].run_he_inference(all_enc_xi, hospital_ctx, others)
         # 워치가 복호화해서 비교 
