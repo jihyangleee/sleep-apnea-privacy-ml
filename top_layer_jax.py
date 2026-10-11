@@ -97,6 +97,169 @@ top_layer_loss_and_grad = jax.value_and_grad(
 )
 
 
+# ── BCE-safe variant (sigma'(z) floor) ──────────────────────────────────────
+# 평문 실험(experiments/features/mse_vs_bce.py의 bce_sigprime_floor)에서 가장
+# 좋은 성능을 낸 그래디언트를 SPU 경로에 그대로 옮긴 것.
+#
+#   grad_z = (pred - y) * max(sigma'(z), floor) / batch
+#
+# MSE의 자동미분 그래디언트는 2*(pred-y)*sigma'(z)/batch 인데, sigma'(z) =
+# 0.197 - 0.012*z^2 가 |z|~4.05를 넘으면 음수로 뒤집혀 그래디언트 방향이
+# 틀어진다 (지난 분석 참고). 여기서는 sigma'(z)에 바닥(floor)을 둬서 방향이
+# 절대 뒤집히지 않게 한다. jax.grad로 이 식을 "유도"하는 게 아니라
+# jax.custom_vjp로 역전파를 직접 지정한다 -- autodiff가 자동으로 만들어내는
+# 진짜 MSE 그래디언트가 아니라, 의도적으로 다른 그래디언트를 주입하는 것이기
+# 때문이다 (지난 설명의 "근사의 근사"에 해당).
+#
+# SPU에서 돌 때는 jnp.clip이 비교(comparison) 연산으로 컴파일된다 -- ABY3가
+# 비교를 기본 프리미티브로 지원하므로 추가 구현 없이 그대로 동작한다.
+def _bce_safe_core(logit: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    pred = sigmoid_approx(logit)
+    return jnp.mean((pred - y) ** 2)
+
+
+_bce_safe_core = jax.custom_vjp(_bce_safe_core)
+
+
+def _bce_safe_core_fwd(logit, y):
+    pred = sigmoid_approx(logit)
+    loss = jnp.mean((pred - y) ** 2)  # 모니터링용 -- 역전파에는 쓰이지 않음
+    return loss, (logit, y, pred)
+
+
+def _bce_safe_core_bwd(res, g):
+    logit, y, pred = res
+    sigma_prime = 0.197 - 0.012 * logit ** 2
+    weight = jnp.clip(sigma_prime, a_min=0.02)  # 바닥 -- 여기서 비교(clip) 발생
+    batch = logit.shape[0]
+    grad_logit = g * (pred - y) * weight / batch
+    return (grad_logit, jnp.zeros_like(y))
+
+
+_bce_safe_core.defvjp(_bce_safe_core_fwd, _bce_safe_core_bwd)
+
+
+def top_layer_loss_bce_safe(logit_shares: list, y_shares: list) -> jnp.ndarray:
+    logit = sum(logit_shares)
+    y = sum(y_shares)
+    return _bce_safe_core(logit, y)
+
+
+top_layer_loss_and_grad_bce_safe = jax.value_and_grad(
+    lambda logit_shares, y_shares: top_layer_loss_bce_safe(logit_shares, y_shares),
+    argnums=0,
+)
+
+
+# ── MSE-floor variant (실측 1등: MSE 계수 2 유지 + sigma'(z) 바닥) ──────────────
+# experiments/features/bce_safe_15features_selfsim.py의 mse_floor와 동일 공식.
+# grad_z = 2*(pred-y)*max(sigma'(z), floor)/batch
+def _mse_floor_core(logit: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    pred = sigmoid_approx(logit)
+    return jnp.mean((pred - y) ** 2)
+
+
+_mse_floor_core = jax.custom_vjp(_mse_floor_core)
+
+
+def _mse_floor_core_fwd(logit, y):
+    pred = sigmoid_approx(logit)
+    loss = jnp.mean((pred - y) ** 2)
+    return loss, (logit, y, pred)
+
+
+def _mse_floor_core_bwd(res, g):
+    logit, y, pred = res
+    sigma_prime = 0.197 - 0.012 * logit ** 2
+    weight = jnp.clip(sigma_prime, a_min=0.02)
+    batch = logit.shape[0]
+    grad_logit = g * 2 * (pred - y) * weight / batch
+    return (grad_logit, jnp.zeros_like(y))
+
+
+_mse_floor_core.defvjp(_mse_floor_core_fwd, _mse_floor_core_bwd)
+
+
+def top_layer_loss_mse_floor(logit_shares: list, y_shares: list) -> jnp.ndarray:
+    logit = sum(logit_shares)
+    y = sum(y_shares)
+    return _mse_floor_core(logit, y)
+
+
+top_layer_loss_and_grad_mse_floor = jax.value_and_grad(
+    lambda logit_shares, y_shares: top_layer_loss_mse_floor(logit_shares, y_shares),
+    argnums=0,
+)
+
+
+# ── DP 노이즈를 reveal 이전(SPU 내부)에서 더하는 버전 ───────────────────────────
+# 문제: 기존 Algorithm 1은 g를 병원 i에게 공개한 "뒤" 노이즈를 더한다. 이 순서에서는
+# 병원 i가 노이즈 없는 진짜 g를 먼저 보게 되므로, g의 부호로 라벨을 그대로 읽을 수
+# 있다 -- 노이즈가 병원 i 자신으로부터는 전혀 보호하지 못한다.
+#
+# 해법: 노이즈 자체를 비밀분산해서 SPU 안으로 들여보낸 뒤, 그래디언트에 더하고 나서
+# reveal한다. 이러면 공개되는 순간 이미 노이즈가 섞여 있어서, 그 노이즈의 합을
+# 혼자 아는 병원이 없으므로 (라벨 y를 비밀분산하는 것과 완전히 같은 패턴) 정확한
+# 원본 g를 아무도 복원할 수 없다.
+#
+# noise_shares: 3개 병원이 각자 로컬에서 N(0, sigma_dp^2/3)을 뽑아 만든 조각.
+# 세 조각의 합은 N(0, sigma_dp^2) 전체이며, 이 합을 혼자 아는 병원은 없다
+# (병원 i는 자기 조각만 알고, 남의 조각은 share로만 받는다 -- additive_split과 동일 패턴).
+# 노이즈가 섞인 g+noise는 전 병원에게 동일하게 공개된다 (병원별로 다른 노이즈를
+# 따로 공개하려면 "병원 i를 제외한 나머지 둘이" 그 노이즈를 대신 넣어줘야 하는데,
+# 이 버전은 가장 단순한 형태로 전원에게 같은 노이즈 낀 값을 공개하는 쪽을 택했다).
+def _loss_and_noisy_grad_mse_floor(logit_shares: list, y_shares: list, noise_shares: list):
+    loss, grads = top_layer_loss_and_grad_mse_floor(logit_shares, y_shares)
+    noise_total = sum(noise_shares)  # SPU 내부에서만 합쳐짐 -- 어느 병원도 이 합을 혼자 모름
+    noisy_grads = [g + noise_total for g in grads]
+    return (loss, *noisy_grads)
+
+
+# ── BCE 로짓 트릭 + z 범위 제한 (clip_z / seg3) ─────────────────────────────
+# 평문 실험(mse_vs_bce.py)의 bce_clip_z / bce_seg3 를 SPU 경로로 옮긴 것.
+#
+#   grad_z = (sigma_hat(z) - y) / batch
+#
+#   clip_z : sigma_hat(z) = sigmoid_approx(clip(z, -4, 4))
+#            3차 근사의 기울기 0.197-0.012z^2 가 |z|~4.05에서 0이 되므로
+#            그 안쪽(단조증가 구간)으로 z를 먼저 묶는다.
+#   seg3   : sigma_hat(z) = SPU SIGMOID_SEG3 (|z|<=4: 0.5+0.125z, 바깥: 0/1)
+#
+# bce_safe와 마찬가지로 jax.custom_vjp로 역전파를 직접 지정하고, forward의 loss는
+# 모니터링용 MSE 값이다. clip/select는 SPU에서 비교 연산으로 컴파일된다.
+def _sigmoid_clip_z(logit):
+    return sigmoid_approx(jnp.clip(logit, -4.0, 4.0))
+
+
+def _sigmoid_seg3(logit):
+    return jnp.select([logit < -4, logit > 4], [0.0, 1.0], 0.5 + 0.125 * logit)
+
+
+def _make_bce_logit_loss(sigma_hat):
+    @jax.custom_vjp
+    def core(logit, y):
+        return jnp.mean((sigma_hat(logit) - y) ** 2)
+
+    def fwd(logit, y):
+        pred = sigma_hat(logit)
+        return jnp.mean((pred - y) ** 2), (y, pred)
+
+    def bwd(res, g):
+        y, pred = res
+        grad_logit = g * (pred - y) / pred.shape[0]
+        return (grad_logit, jnp.zeros_like(y))
+
+    core.defvjp(fwd, bwd)
+    return jax.value_and_grad(
+        lambda logit_shares, y_shares: core(sum(logit_shares), sum(y_shares)),
+        argnums=0,
+    )
+
+
+top_layer_loss_and_grad_bce_clip_z = _make_bce_logit_loss(_sigmoid_clip_z)
+top_layer_loss_and_grad_bce_seg3 = _make_bce_logit_loss(_sigmoid_seg3)
+
+
 if __name__ == "__main__":
     import numpy as np
     import torch

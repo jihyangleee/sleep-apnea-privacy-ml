@@ -255,16 +255,13 @@ PolyAct: `f(x) = 0.197x + 0.004x³` (ReLU의 다항식 근사, `x·(0.197 + 0.00
 │
 │   ── 공용 모듈 (루트) ──────────────────────────────────────────────
 ├── dataset.py                 SHHS 로드(CSV + desat XML), MODEL_FEATURES, 더미 워치 프로파일
-├── model.py                   LinearHospitalModel, HospitalModel, ClientSubModel,
-│                              PolyActivation, FeatureTokenizer
+├── model.py                   LinearHospitalModel, HospitalModel, ClientSubModel, PolyActivation
 ├── secret_sharing.py          additive_split, apply_dp_noise, BeaverProvider
 ├── simulate.py                run_distributed_simulation (SLEEP_FEATURE_GROUPS, model_type)
 ├── he_client.py               build_he_context (환자·병원 공유 CKKS 컨텍스트)
 ├── schemas.py                 FastAPI Pydantic 요청/응답 모델
 ├── extract_desat_features.py  SpO2 desaturation 피처 추출 (odi 등, NSRR XML)
-├── linear_attention_jax.py    linear attention 1블록 (JAX, 평문 실험용)
-├── linear_attention_deep_jax.py  다층 linear attention (pre-LN + residual)
-├── top_layer_jax.py           SPU에 올리는 top-layer loss/grad
+├── top_layer_jax.py           SPU에 올리는 top-layer loss/grad (mse/bce_safe/bce_clip_z/bce_seg3/mse_floor)
 │
 ├── app/                       실제 서비스 (FastAPI + GUI)
 │   ├── hospital_app.py        FastAPI 병원 서버 — MLP 체크포인트 전용
@@ -275,34 +272,25 @@ PolyAct: `f(x) = 0.197x + 0.004x³` (ReLU의 다항식 근사, `x·(0.197 + 0.00
 │   └── spu_top_layer_test.py  top-layer만 SPU에 올린 최소 동작 테스트
 │
 ├── experiments/               평문 실험 (HE/MPC 없이 정확도만 확인)
-│   ├── simulate_linear_attention.py   단일 블록 베이스라인
-│   ├── simulate_watch_domain_gap.py   PSG → 워치 도메인 갭 측정 (앞의 5개 피처만)
-│   ├── architecture/          모델 구조·학습 안정화 비교
-│   │   ├── compare_model_families.py     로지스틱 회귀 vs MLP vs GBDT (8/13/15피처)
-│   │   ├── evaluate_checkpoints.py       평문 vs MPC 학습 체크포인트 (정확도·AUC·민감도·특이도, 부트스트랩 CI)
-│   │   ├── compare_depth_experiment.py   깊이 (clipping 이전, 발산)
-│   │   ├── compare_depth_clipped.py      깊이 (clipping + final LN)
-│   │   ├── compare_width_clipping.py     너비 d, gradient clipping
-│   │   ├── compare_normalization_waso.py 정규화 방식
-│   │   ├── compare_loss_function.py      손실 함수
-│   │   └── compare_mlp_vs_attention.py   MLP vs linear attention
-│   └── features/              피처 구성 실험
-│       ├── feature_ablation_experiment.py  피처 ablation (+ load_with_features 로더)
-│       ├── combined_desat_experiment.py    8피처 + waso/latency + desat 피처
-│       └── event_feature_experiment.py     이벤트 기반 피처
+│   ├── simulate_watch_domain_gap.py   PSG → 워치 도메인 갭 측정
+│   └── features/              피처 구성·손실 함수 비교 (현재 세션 기준 최신)
+│       ├── mse_vs_bce.py                   MSE vs BCE 변형 (clip_z, sigprime_floor 등)
+│       ├── bce_safe_15features_selfsim.py  mse_floor 포함 자체 시뮬레이션 비교
+│       ├── bce_zerocompare.py              비교 연산 없는 BCE (가중치 norm projection)
+│       ├── he_vs_plaintext_accuracy.py     평문 vs CKKS 추론 정확도 실측
+│       └── watch_scenario_variant.py       워치 노이즈 시나리오 (14개 피처)
 │
 ├── shhs/                      NSRR SHHS 데이터 (CSV, XML 주석, EDF는 미사용)
 ├── physionet.org/             DREAMT v2.1.0 (현재 파이프라인에서 미사용)
 │
 └── docs/
-    ├── linear_attention.md       P2P VFL + SPU/CKKS + FT-Transformer 설계 문서 (구현과 차이 있음)
-    ├── submodel.md               sub-model 설계 노트 (HE 곱셈 깊이 제약)
     └── CRYPTEN_MESH_DESIGN.md    CrypTen mesh 구조 설계 (미구현, 논의 단계)
 ```
 
-`docs/linear_attention.md`는 FT-Transformer + Linear Attention을 SPU에서 학습하는 **목표 설계**이고,
-현재 코드는 그 구조를 구현하지 않았다. Linear Attention은 평문 JAX 실험(`experiments/`)에서만
-돈다.
+로지스틱 회귀와 무관한 실험(Linear Attention, FT-Transformer 방향 설계)은 전부 제거했다
+(`linear_attention_jax.py`, `linear_attention_deep_jax.py`, `model.py`의 `FeatureTokenizer`,
+`docs/linear_attention.md`). 지금 코드는 선형 로지스틱 회귀(`LinearHospitalModel`) 하나로
+통일되어 있다.
 
 ### 제거된 실험 — CVHR (ECG 기반 심박 변동)
 

@@ -27,3 +27,6 @@ env/
 .vscode/
 .idea/
 
+
+# SHHS 샘플 (실제 참가자 데이터 — DUA 대상, 커밋 금지)
+/shhs_sample/
