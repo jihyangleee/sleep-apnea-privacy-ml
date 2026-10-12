@@ -260,6 +260,15 @@ top_layer_loss_and_grad_bce_clip_z = _make_bce_logit_loss(_sigmoid_clip_z)
 top_layer_loss_and_grad_bce_seg3 = _make_bce_logit_loss(_sigmoid_seg3)
 
 
+# bce_clip_z에 _loss_and_noisy_grad_mse_floor와 같은 "reveal 이전 노이즈"를 적용한 버전.
+# grad_z = (sigma_hat(z) - y) / batch 도 부호로 라벨이 드러나므로 같은 방식으로 막는다.
+def _loss_and_noisy_grad_bce_clip_z(logit_shares: list, y_shares: list, noise_shares: list):
+    loss, grads = top_layer_loss_and_grad_bce_clip_z(logit_shares, y_shares)
+    noise_total = sum(noise_shares)  # SPU 내부에서만 합쳐짐 -- 어느 병원도 이 합을 혼자 모름
+    noisy_grads = [g + noise_total for g in grads]
+    return (loss, *noisy_grads)
+
+
 if __name__ == "__main__":
     import numpy as np
     import torch

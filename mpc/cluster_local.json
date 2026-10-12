@@ -1,0 +1,10 @@
+{
+  "_comment": "병원당 포트 2개: sf_port = SecretFlow 노드 간 통신(객체 전달), spu_port = SPU 런타임 링크(MPC 연산). 같은 머신이면 6개 포트가 모두 달라야 한다. 병원별로 서버가 다르면 host만 바꾸면 된다.",
+  "parties": {
+    "hospital0": {"role": "A", "host": "127.0.0.1", "sf_port": 9100, "spu_port": 9200},
+    "hospital1": {"role": "B", "host": "127.0.0.1", "sf_port": 9101, "spu_port": 9201},
+    "hospital2": {"role": "C", "host": "127.0.0.1", "sf_port": 9102, "spu_port": 9202}
+  },
+  "label_holder": "hospital1",
+  "bias_holder": "hospital0"
+}
