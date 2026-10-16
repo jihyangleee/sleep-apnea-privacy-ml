@@ -33,3 +33,6 @@ env/
 
 # SPU 학습 체크포인트 (병원별 가중치)
 mpc/checkpoints/
+
+# 논문
+docs/
