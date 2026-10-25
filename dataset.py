@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 SHHS_FEATURES = [
     "avgsat",     # SpO2: 평균 산소포화도 (%) — CSV: avgsat
     "avg_hr",     # avg heart rate: 평균 심박수 — CSV에 없음, load 시 4개 컬럼 평균으로 계산
-    "slpprdp",    # total sleep time: 총 수면 시간 (분) — CSV: slpprdp
+    "slpprdp",    # total sleep time: 총 수면 시간 (분) — CSV: slpprdp 
     "slpeffp",    # sleep efficiency: 수면 효율 (%) — CSV: slpeffp
     "times34p",   # deep sleep ratio: 3-4단계 수면 비율 (%) — CSV: times34p
     "age_s1",     # age

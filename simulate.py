@@ -142,6 +142,7 @@ def run_distributed_simulation(
                 hospitals[j].logit_share(local_embs[j], j == 0)
                 for j in range(NUM_CLIENTS)
             ]
+
             # bias 는 병원 0만 더함  
             step_ms["top_layer"] += (time.perf_counter() - t0) * 1000
 
@@ -149,6 +150,7 @@ def run_distributed_simulation(
             # logit stays in share form; no party reconstructs the raw logit.
             # x³ needs 2 multiplications → 2 triples.
             # share 를 합차지 않고 글대로 넘김
+            
             t0 = time.perf_counter()
             triple1 = beaver.generate_triple(logit_shares[0].shape)
             triple2 = beaver.generate_triple(logit_shares[0].shape)

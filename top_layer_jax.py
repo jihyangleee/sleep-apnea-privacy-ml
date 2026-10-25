@@ -229,43 +229,44 @@ def _loss_and_noisy_grad_mse_floor(logit_shares: list, y_shares: list, noise_sha
 # 모니터링용 MSE 값이다. clip/select는 SPU에서 비교 연산으로 컴파일된다.
 def _sigmoid_clip_z(logit):
     return sigmoid_approx(jnp.clip(logit, -4.0, 4.0))
-
-
+ # 0.5 + 0.197z − 0.004z³ 로 sigmoid를 근사함 -> 약 범위가 0.06 에서 0.94가 나옴
 def _sigmoid_seg3(logit):
     return jnp.select([logit < -4, logit > 4], [0.0, 1.0], 0.5 + 0.125 * logit)
 
 
 def _make_bce_logit_loss(sigma_hat):
     @jax.custom_vjp
-    def core(logit, y):
+    def core(logit, y): # loss 식 
         return jnp.mean((sigma_hat(logit) - y) ** 2)
 
     def fwd(logit, y):
         pred = sigma_hat(logit)
-        return jnp.mean((pred - y) ** 2), (y, pred)
+        return jnp.mean((pred - y) ** 2), (y, pred) 
 
-    def bwd(res, g):
+    def bwd(res, g): # 역전파 - gradient를 유도하지 않고 직접 지정함 
         y, pred = res
-        grad_logit = g * (pred - y) / pred.shape[0]
-        return (grad_logit, jnp.zeros_like(y))
+        grad_logit = g * (pred - y) / pred.shape[0] 
+        return (grad_logit, jnp.zeros_like(y)) 
 
-    core.defvjp(fwd, bwd)
+    core.defvjp(fwd, bwd)  # 미분은 bwd 로 하는 뜻 
     return jax.value_and_grad(
         lambda logit_shares, y_shares: core(sum(logit_shares), sum(y_shares)),
         argnums=0,
     )
 
 
-top_layer_loss_and_grad_bce_clip_z = _make_bce_logit_loss(_sigmoid_clip_z)
+top_layer_loss_and_grad_bce_clip_z = _make_bce_logit_loss(_sigmoid_clip_z) 
+# 여기서 loss 와 gradient를 구함
 top_layer_loss_and_grad_bce_seg3 = _make_bce_logit_loss(_sigmoid_seg3)
 
 
 # bce_clip_z에 _loss_and_noisy_grad_mse_floor와 같은 "reveal 이전 노이즈"를 적용한 버전.
 # grad_z = (sigma_hat(z) - y) / batch 도 부호로 라벨이 드러나므로 같은 방식으로 막는다.
 def _loss_and_noisy_grad_bce_clip_z(logit_shares: list, y_shares: list, noise_shares: list):
-    loss, grads = top_layer_loss_and_grad_bce_clip_z(logit_shares, y_shares)
+    loss, grads = top_layer_loss_and_grad_bce_clip_z(logit_shares, y_shares) 
+    # loss 와 gradients 3개를 구한다.(z_A,z_B,z_C)
     noise_total = sum(noise_shares)  # SPU 내부에서만 합쳐짐 -- 어느 병원도 이 합을 혼자 모름
-    noisy_grads = [g + noise_total for g in grads]
+    noisy_grads = [g + noise_total for g in grads] # 같은 noise(dp)를 gradient에 더한다. 
     return (loss, *noisy_grads)
 
 

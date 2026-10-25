@@ -91,11 +91,11 @@ def _init_state(X, has_bias, seed):
     }
 
 
-def _logit_share(state, X, idx):
-    out = X[idx] @ state["params"]["w"]
-    if "b" in state["params"]:
+def _logit_share(state, X, idx): # 로짓 조각을 계산하는 함수 
+    out = X[idx] @ state["params"]["w"] # 한 배치당 256명의 사람들이 있음
+    if "b" in state["params"]: # 병원 b 에서만 bias를 더함 
         out = out + state["params"]["b"]
-    return jnp.array(out.astype(np.float32))
+    return jnp.array(out.astype(np.float32))# SPU로 보낼 수 있는 JAX 배열로 바꿈
 
 
 def _batch_label(y, idx):
@@ -105,22 +105,22 @@ def _batch_label(y, idx):
 def _noise_share(shape, sigma):
     return jnp.array(np.random.normal(0.0, sigma, size=shape).astype(np.float32))
 
-
+# spu에서 받은 그래디언트로 각 병원이 자기 가중치를 한 번 업데이트하는 함수이다. 
 def _adam_step(state, X, idx, grad_logit, lr, beta1=0.9, beta2=0.999, eps=1e-8):
     """torch.optim.Adam 기본값과 같은 업데이트. grad_logit = dL/d(logit_share_i), (B, 1)."""
-    g = np.asarray(grad_logit, dtype=np.float32)
-    grads = {"w": X[idx].T @ g}
+    g = np.asarray(grad_logit, dtype=np.float32) # grad_logit은 환자마다 로짓을 얼마나 바꿔야 하는지 이다. 
+    grads = {"w": X[idx].T @ g} # 그  피처값 (5x256)@(256x1)  그 환자의 로짓 그래디언트 
     if "b" in state["params"]:
         grads["b"] = g.sum(axis=0)
 
     t = state["t"] + 1
     params, m, v = {}, {}, {}
     for k, p in state["params"].items():
-        m[k] = beta1 * state["m"][k] + (1 - beta1) * grads[k]
-        v[k] = beta2 * state["v"][k] + (1 - beta2) * grads[k] ** 2
+        m[k] = beta1 * state["m"][k] + (1 - beta1) * grads[k] # gradient 이동 평균(방향 부드럽게 함) 
+        v[k] = beta2 * state["v"][k] + (1 - beta2) * grads[k] ** 2 # gradient 제곱의 이동 평균(크기 정규화함)
         m_hat = m[k] / (1 - beta1 ** t)
         v_hat = v[k] / (1 - beta2 ** t)
-        params[k] = (p - lr * m_hat / (np.sqrt(v_hat) + eps)).astype(np.float32)
+        params[k] = (p - lr * m_hat / (np.sqrt(v_hat) + eps)).astype(np.float32) #학습률
     return {"params": params, "m": m, "v": v, "t": t}
 
 
@@ -147,11 +147,12 @@ def _save_checkpoint(state, meta, path, info):
 
 # ── SPU 안에서 실행되는 함수들 ────────────────────────────────────────────────
 # 라벨은 병원 B 한 곳에서 오므로 y_shares 자리에 [y] 하나만 넘긴다 (sum([y]) == y).
-
+# spu 내에서 하는 것 : 로짓 조각 합침 -> 범위 자르기(clip_z) -> 시그모이드 근사 -> 로짓 그래디언트 -> dp 노이즈 더하기
 def _spu_step(logit_shares, y, noise_shares):
     """(loss, grad_0 + noise, ..., grad_{n-1} + noise). 노이즈는 공개 전에 SPU 안에서 더해진다."""
     return _loss_and_noisy_grad_bce_clip_z(logit_shares, [y], noise_shares)
-
+# 해당 함수는 SPU 진입점이다. logit_share [z_A, z_B, z_C] 각각 (256x1)
+# y (병원B에만 있는 label 값), noise_share  [n_A,n_B,n_C] (256x1) 세 병원의 noise_share 
 
 def _spu_accuracy(logit_shares, y):
     logit = sum(logit_shares)
@@ -213,6 +214,7 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
         print(f"[{self_party}] 체크포인트 저장 (epoch {epoch}): "
               f"{os.path.join(ckpt_dir, self_party + '.npz')}", flush=True)
 
+    # 학습 시작 부분 
     t_train_start = time.perf_counter()
     for epoch in range(1, n_epochs + 1):
         perm = idx_train[shuffle_rng.permutation(len(idx_train))]
@@ -237,12 +239,13 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
                 num_returns_policy=SPUCompilerNumReturnsPolicy.FROM_USER,
                 user_specified_num_returns=1 + n_parties,
             )(logit_spu, y_spu, noise_spu)
-            loss_spu, grads_spu = outs[0], list(outs[1:])
+            loss_spu, grads_spu = outs[0], list(outs[1:]) # 결과 loss 와 gradient를 얻음
 
             for i in range(n_parties):
-                # 노이즈가 섞인 grad_i가 병원 i에게만 공개된다.
+                # dp 노이즈가 섞인 grad_i가 병원 i에게만 공개된다.
                 grad_i = grads_spu[i].to(pyus[i])
-                states[i] = pyus[i](_adam_step)(states[i], X[i], idx, grad_i, lr)
+                states[i] = pyus[i](_adam_step)(states[i], X[i], idx, grad_i, lr) 
+                # 자신의 가중치를 업데이트함
 
             # reveal_loss=False면 loss는 끝까지 비밀분산 상태로 남는다 (reveal 자체를 안 함).
             if reveal_loss:
@@ -252,6 +255,7 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
         epoch_wall_s = time.perf_counter() - t_epoch_start
         loss_str = f"{epoch_loss/max(n_batches,1):.4f}" if reveal_loss else "비공개"
         msg = f"  Epoch {epoch:3d}/{n_epochs} | loss={loss_str} | wall={epoch_wall_s:.1f}s ({n_batches} batches)"
+        
         if epoch % eval_every == 0 or epoch == 1 or epoch == n_epochs:
             test_acc = evaluate()
             msg += f" | test_acc={test_acc:.4f}"

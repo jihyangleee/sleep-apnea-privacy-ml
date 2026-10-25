@@ -34,5 +34,7 @@ env/
 # SPU 학습 체크포인트 (병원별 가중치)
 mpc/checkpoints/
 
+# galaxy watch 데이터 (추론용)
+1024/
 # 논문
 docs/
