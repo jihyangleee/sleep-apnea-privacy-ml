@@ -151,8 +151,9 @@ CHANNELS = {"sao2": SAO2_LABELS, "hr": ("H.R.",), "ox_stat": ("OXSTAT",)}
 
 
 def has_all_channels(npz_path):
+    # OX stat 채널이 없는 EDF도 있으므로 완료 판정은 심박(hr) 유무로 한다 (없으면 재시작마다 다시 받게 됨)
     with np.load(npz_path) as d:
-        return all(k in d.files for k in CHANNELS)
+        return "hr" in d.files
 
 
 def is_done(f, refetch):

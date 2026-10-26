@@ -23,14 +23,15 @@ _SHHS_HR_COLS = ["savbnbh", "savbnoh", "savbrbh", "savbroh"]
 SHHS_LABEL    = "ahi_a0h3a"
 AHI_THRESHOLD = 15  # 중등도 이상 수면무호흡
 
-# SpO2 저하(desaturation) 이벤트 요약 피처 — CSV가 아니라 NSRR 이벤트 주석 XML에서 추출한다
-# (extract_desat_features.py). 산소포화도 센서 하나만 쓰는 피처이고, 호흡 이벤트(무호흡/저호흡)는
-# 라벨(AHI)을 그대로 재구성하게 되므로 일부러 제외했다.
-SHHS_DESAT_FEATURES = ["odi", "mean_desat_duration", "mean_desat_drop"]
+# SpO2 1분 피처 — EDF SaO2(1Hz)를 워치와 같은 1분 (평균, 최소, 최대)로 묶어 계산한다
+# (oximetry_features.py, 워치 데이터에도 같은 함수를 쓴다).
+# 예전 XML 저하 피처(odi, mean_desat_duration, mean_desat_drop)는 무호흡·저호흡에 딸린 저하만 담고
+# 있어 라벨(AHI) 누출이 생기므로 쓰지 않는다 (extract_desat_features.py는 기록용으로만 남김).
+SHHS_OXI_FEATURES = ["odi_1min", "pct_lt90", "min_spo2", "desat_drop_1min", "desat_min_frac"]
 # 학습·추론에 실제로 쓰는 전체 피처 순서 (모델 입력 = 이 순서)
-MODEL_FEATURES = SHHS_FEATURES + SHHS_DESAT_FEATURES   # 11 + 3 = 14
+MODEL_FEATURES = SHHS_FEATURES + SHHS_OXI_FEATURES   # 11 + 5 = 16
 DEFAULT_XML_DIR    = "shhs/polysomnography/annotations-events-nsrr/shhs1"
-DESAT_CACHE_CSV    = "shhs/datasets/desat_features_all.csv"  # XML 파싱(~12초) 결과 캐시
+OXI_FEATURES_CSV   = "shhs/datasets/oximetry_1min_features.csv"  # python oximetry_features.py 결과
 
 
 def explore_shhs_csv(csv_path: str):
@@ -46,22 +47,20 @@ def explore_shhs_csv(csv_path: str):
         print(f"  {name:<15} {status}")
 
 
-def _load_desat_features(xml_dir: str, cache_csv: str = DESAT_CACHE_CSV) -> pd.DataFrame:
-    """nsrrid로 색인된 desat 피처 표. 캐시 CSV가 있으면 재사용하고 없으면 XML을 파싱해 만든다."""
+def _load_oximetry_features(csv_path: str = OXI_FEATURES_CSV) -> pd.DataFrame:
+    """nsrrid로 색인된 SpO2 1분 피처 표. 없으면 `python oximetry_features.py`로 먼저 만든다
+    (EDF SaO2는 download_shhs_sao2.py가 shhs/sao2/에 받아 둔다)."""
     import os
-    if os.path.exists(cache_csv):
-        return pd.read_csv(cache_csv, index_col="nsrrid")[SHHS_DESAT_FEATURES]
-    from extract_desat_features import extract_all
-    desat_df = extract_all(xml_dir)
-    desat_df[SHHS_DESAT_FEATURES].to_csv(cache_csv)
-    return desat_df[SHHS_DESAT_FEATURES]
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"{csv_path} 없음 — 먼저 `python oximetry_features.py` 실행")
+    return pd.read_csv(csv_path, index_col="nsrrid")[SHHS_OXI_FEATURES]
 
 
-def load_shhs_data(csv_path: str, return_scaler: bool = False, xml_dir: str = DEFAULT_XML_DIR):
-    """NSRR SHHS-1 CSV + 이벤트 주석 XML 로드 → (X, y) 반환.
+def load_shhs_data(csv_path: str, return_scaler: bool = False, oxi_csv: str = OXI_FEATURES_CSV):
+    """NSRR SHHS-1 CSV + SpO2 1분 피처 로드 → (X, y) 반환.
 
-    X — (n_samples, 14) float32, StandardScaler 정규화. 열 순서는 MODEL_FEATURES
-        (CSV 11개 + desat 3개). XML이 내려받아진 참가자만 남는다(inner join).
+    X — (n_samples, 16) float32, StandardScaler 정규화. 열 순서는 MODEL_FEATURES
+        (CSV 11개 + SpO2 1분 5개). EDF SaO2가 있는 참가자만 남는다(inner join).
     y — (n_samples,)   float32, 0=정상 / 1=수면무호흡(AHI≥15)
     return_scaler=True 시 (X, y, scaler) 반환
     """
@@ -73,7 +72,7 @@ def load_shhs_data(csv_path: str, return_scaler: bool = False, xml_dir: str = DE
     # avg_hr은 4개 HR 열의 (결측 무시) 평균이므로 원시 HR 열의 결측은 버릴 이유가 없다.
     # df.dropna() 전체를 쓰면 savbrbh 등이 비어 있는 참가자를 불필요하게 잃는다(5.8천 → 2.5천명).
     df = df.dropna(subset=SHHS_FEATURES + [SHHS_LABEL])
-    df = df.set_index("nsrrid").join(_load_desat_features(xml_dir), how="inner")
+    df = df.set_index("nsrrid").join(_load_oximetry_features(oxi_csv), how="inner")
 
     X = df[MODEL_FEATURES].values.astype(np.float32)
     y = (df[SHHS_LABEL].values >= AHI_THRESHOLD).astype(np.float32)

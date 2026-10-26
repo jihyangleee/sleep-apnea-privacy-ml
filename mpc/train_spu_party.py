@@ -57,12 +57,18 @@ LOSS_TYPE = "bce_clip_z_dp"  # 체크포인트 메타데이터용
 # PYU - Python Processing Unit (각 병원에서 발생하는 연산)
 
 def _load_features(role, data_dir):
-    """(표준화된 X, 표준화 메타데이터). 메타데이터는 체크포인트에 같이 저장해 추론 때 같은 변환을 쓴다."""
+    """(원본 X, 피처 이름). 표준화는 학습/test 분할 뒤 _standardize에서 학습 행만으로 맞춘다."""
     df = pd.read_csv(os.path.join(data_dir, f"{role}.csv"), index_col="nsrrid")
     df = df.drop(columns=[SHHS_LABEL], errors="ignore")
-    scaler = StandardScaler()
-    X = scaler.fit_transform(df.values.astype(np.float32)).astype(np.float32)
-    meta = {"feature_names": list(df.columns), "scaler_mean": scaler.mean_, "scaler_scale": scaler.scale_}
+    return df.values.astype(np.float32), list(df.columns)
+
+
+def _standardize(X_raw, names, idx_train):
+    """(표준화된 X, 표준화 메타데이터). 평균·표준편차는 학습 행으로만 계산해 test 정보가 섞이지 않게 한다.
+    메타데이터는 체크포인트에 같이 저장해 추론 때 같은 변환을 쓴다."""
+    scaler = StandardScaler().fit(X_raw[idx_train])
+    X = scaler.transform(X_raw).astype(np.float32)
+    meta = {"feature_names": names, "scaler_mean": scaler.mean_, "scaler_scale": scaler.scale_}
     return X, meta
 
 
@@ -179,16 +185,21 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
 
     # 1) 각자 자기 파일만 로드
     loaded = [pyus[i](_load_features, num_returns=2)(roles[i], data_dir) for i in range(n_parties)]
-    X = [x for x, _ in loaded]
-    meta = [m for _, m in loaded]
+    X_raw = [x for x, _ in loaded]
+    names = [m for _, m in loaded]
     y = pyus[label_idx](_load_label)(roles[label_idx], data_dir)
 
     # 행 개수는 공개 메타데이터 -- 세 병원이 같은 환자 집합을 같은 순서로 갖는지 확인
-    n_rows = sf.reveal([pyus[i](_num_rows)(X[i]) for i in range(n_parties)])
+    n_rows = sf.reveal([pyus[i](_num_rows)(X_raw[i]) for i in range(n_parties)])
     assert len(set(n_rows)) == 1, f"병원별 행 개수가 다르다: {n_rows} (PSI 정렬 필요)"
     n = n_rows[0]
     idx_train, idx_test = train_test_split(np.arange(n), test_size=0.2, random_state=42)
     print(f"[data] n={n}, train={len(idx_train)}, test={len(idx_test)}", flush=True)
+
+    # 표준화: 각 병원이 자기 학습 행만으로 평균·표준편차를 맞춘다 (test 행은 변환만)
+    scaled = [pyus[i](_standardize, num_returns=2)(X_raw[i], names[i], idx_train) for i in range(n_parties)]
+    X = [x for x, _ in scaled]
+    meta = [m for _, m in scaled]
 
     # 2) 병원별 로컬 파라미터 초기화 (bias는 한 병원만)
     states = [pyus[i](_init_state)(X[i], i == bias_idx, seed * 100 + i) for i in range(n_parties)]

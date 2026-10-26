@@ -24,6 +24,12 @@ namespace {
 constexpr std::size_t N = NUM_HEALTH_FEATURES;
 constexpr std::size_t H = 3;
 constexpr std::size_t SUM_SLOT = 0; // 16-slot block, right rotations
+// 병원별 피처 수 (A: SpO2·심박 7, B: 수면 4, C: 인구통계·설문 5). 합이 N = 16 이어야 회전 1·2·4·8 합산 블록에 맞는다.
+constexpr std::array<std::size_t, H> HOSPITAL_SIZES{7, 4, 5};
+static_assert(HOSPITAL_SIZES[0] + HOSPITAL_SIZES[1] + HOSPITAL_SIZES[2] == N, "hospital sizes must sum to N");
+static_assert(N <= 16, "rotation sum (1,2,4,8) covers at most 16 slots");
+// 학습(train_spu_party.py) 정확도와 같은 기준: logit > 0 ⇔ σ > 0.5. 다른 값은 `client <threshold>`로 준다.
+constexpr double DEFAULT_THRESHOLD = 0.5;
 
 struct Model {
     std::array<std::string, N> names{};
@@ -46,7 +52,7 @@ Model loadModel(const std::string& filename) {
     expect(in, "HEAAN2_LINEAR_V1");
     expect(in, "NUM_FEATURES");
     std::size_t count = 0;
-    if (!(in >> count) || count != N) throw std::runtime_error("Expected 14 features");
+    if (!(in >> count) || count != N) throw std::runtime_error("Expected " + std::to_string(N) + " features");
     Model m;
     expect(in, "FEATURE_NAMES");
     for (auto& v : m.names) if (!(in >> v)) throw std::runtime_error("Bad feature names");
@@ -54,7 +60,7 @@ Model loadModel(const std::string& filename) {
     for (auto& v : m.mean) if (!(in >> v)) throw std::runtime_error("Bad scaler mean");
     expect(in, "SCALER_SCALE");
     for (auto& v : m.scale) if (!(in >> v) || v <= 0) throw std::runtime_error("Bad scaler scale");
-    constexpr std::array<std::size_t, H> sizes{5, 4, 5};
+    constexpr auto sizes = HOSPITAL_SIZES;
     std::array<bool, N> covered{};
     for (std::size_t h = 0; h < H; ++h) {
         expect(in, "HOSPITAL_" + std::to_string(h) + "_INDICES");
@@ -98,7 +104,7 @@ Model loadHospitalModel(const std::string& path, int h) {
     expect(in,"HEAAN2_HOSPITAL_V1"); expect(in,"HOSPITAL_ID");
     int id; if(!(in>>id)||id!=h) throw std::runtime_error("Hospital ID mismatch");
     expect(in,"INDICES");
-    const size_t count=(h==1?4:5);
+    const size_t count=HOSPITAL_SIZES[h];
     for(size_t j=0;j<count;++j) {size_t idx; if(!(in>>idx)||idx>=N) throw std::runtime_error("Bad index"); m.indices[h].push_back(idx);}
     expect(in,"WEIGHTS");
     for(size_t j=0;j<count;++j) {double w; if(!(in>>w)) throw std::runtime_error("Bad weight"); m.weights[h].push_back(w);}
@@ -415,7 +421,7 @@ void runHospital(int h, const Model& model) {
     close(listener);
 }
 
-void runClient(const Model& model) {
+void runClient(const Model& model, double threshold) {
     const auto totalStart = Clock::now();
 
     const std::string root="/home/user/devkit/examples/heaan2-examples/my_example/";
@@ -533,7 +539,7 @@ void runClient(const Model& model) {
         Message resultMsg;encoder.decode(*resultPt,resultMsg);resultMsg.to(Device::CPU);
         const double logit=resultMsg.data()[0].real()+model.bias;
         const double prob=sigmoid(logit);
-        const int pred=prob>=0.4?1:0;
+        const int pred=prob>=threshold?1:0;
         const int label=patient.label;
         tp+=(pred==1&&label==1);tn+=(pred==0&&label==0);
         fp+=(pred==1&&label==0);fn+=(pred==0&&label==1);
@@ -564,13 +570,13 @@ void runClient(const Model& model) {
     const double sdMs=std::sqrt(std::max(0.0,timeSq/patientCount-meanMs*meanMs));
     std::ofstream summary(root+"v5_metrics.csv");
     summary<<"metric,value\n"<<std::setprecision(15);
-    summary<<"threshold,0.4\npatients,"<<patientCount<<"\nTP,"<<tp<<"\nTN,"<<tn<<"\nFP,"<<fp<<"\nFN,"<<fn
+    summary<<"threshold,"<<threshold<<"\npatients,"<<patientCount<<"\nTP,"<<tp<<"\nTN,"<<tn<<"\nFP,"<<fp<<"\nFN,"<<fn
            <<"\naccuracy,"<<accuracy<<"\nsensitivity,"<<sensitivity<<"\nspecificity,"<<specificity
            <<"\nprecision,"<<precision<<"\nf1,"<<f1<<"\nroc_auc,"<<auc
            <<"\nmean_inference_ms,"<<meanMs<<"\nsd_inference_ms,"<<sdMs<<"\n";
     std::cout<<std::fixed<<std::setprecision(8)
              <<"\n========== V5 EVALUATION ==========\n"
-             <<"patients="<<patientCount<<" threshold=0.4\n"
+             <<"patients="<<patientCount<<" threshold="<<threshold<<"\n"
              <<"TP="<<tp<<" TN="<<tn<<" FP="<<fp<<" FN="<<fn<<"\n"
              <<"accuracy="<<accuracy<<" sensitivity="<<sensitivity
              <<" specificity="<<specificity<<" precision="<<precision
@@ -586,11 +592,15 @@ int main(int argc, char** argv) {
     try {
         if (argc < 2)
             throw std::runtime_error(
-                "Usage: DistributedInference client | hospital 0|1|2");
+                "Usage: DistributedInference client [threshold] | hospital 0|1|2");
 
         const std::string root="/home/user/devkit/examples/heaan2-examples/my_example/";
         const std::string mode=argv[1];
-        if(mode=="client") runClient(loadClientModel(root+"client_model.txt"));
+        if(mode=="client") {
+            const double threshold=argc>=3?std::stod(argv[2]):DEFAULT_THRESHOLD;
+            if(!(threshold>0.0&&threshold<1.0)) throw std::runtime_error("Threshold must be in (0, 1)");
+            runClient(loadClientModel(root+"client_model.txt"),threshold);
+        }
         else if(mode=="hospital"&&argc>=3) {
             const int h=std::stoi(argv[2]);
             if(h<0||h>=3) throw std::runtime_error("Invalid hospital ID");

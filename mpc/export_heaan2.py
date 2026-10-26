@@ -76,9 +76,60 @@ def export(ckpt_dir, out_path):
     print(f"  loss_type={info['loss_type']}  epochs={info['epochs']}  test_acc={float(info['test_acc']):.4f}")
 
 
+def export_v5(model_txt, out_dir, data_dir, test_size=0.2, seed=42):
+    """heaan2_model.txt → inference_v5(DistributedInferenceV5.cpp)가 읽는 파일들.
+
+      client_model.txt        HEAAN2_CLIENT_V1: 피처 이름, 스케일러, bias (환자 기기용)
+      hospital{i}_model.txt   HEAAN2_HOSPITAL_V1: 병원 i의 피처 인덱스와 가중치
+      A.csv / B.csv / C.csv   학습과 같은 test 분할(train_spu_party.py와 같은 random_state)의 원본 피처
+    """
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+
+    tok = {}
+    with open(model_txt, encoding="utf-8") as fh:
+        for line in fh.read().splitlines()[1:]:
+            if line.strip():
+                k, *v = line.split()
+                tok[k] = v
+    os.makedirs(out_dir, exist_ok=True)
+
+    def write(name, lines):
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    write("client_model.txt", [
+        "HEAAN2_CLIENT_V1",
+        "NUM_FEATURES " + tok["NUM_FEATURES"][0],
+        "FEATURE_NAMES " + " ".join(tok["FEATURE_NAMES"]),
+        "SCALER_MEAN " + " ".join(tok["SCALER_MEAN"]),
+        "SCALER_SCALE " + " ".join(tok["SCALER_SCALE"]),
+        "BIAS " + tok["BIAS"][0],
+    ])
+    for i in range(N_HOSPITALS):
+        write(f"hospital{i}_model.txt", [
+            "HEAAN2_HOSPITAL_V1",
+            f"HOSPITAL_ID {i}",
+            "INDICES " + " ".join(tok[f"HOSPITAL_{i}_INDICES"]),
+            "WEIGHTS " + " ".join(tok[f"HOSPITAL_{i}_WEIGHTS"]),
+        ])
+
+    # 학습 test 분할 재현: 세 병원 파일은 같은 nsrrid 순서이고, train_spu_party.py가 행 번호로 나눈다.
+    roles = ["A", "B", "C"]
+    frames = [pd.read_csv(os.path.join(data_dir, f"{r}.csv")) for r in roles]
+    _, idx_test = train_test_split(np.arange(len(frames[0])), test_size=test_size, random_state=seed)
+    for r, df in zip(roles, frames):
+        df.iloc[np.sort(idx_test)].to_csv(os.path.join(out_dir, f"{r}.csv"), index=False)
+    print(f"[export_v5] {out_dir}: client_model.txt, hospital0~2_model.txt, A/B/C.csv (test {len(idx_test)}명)")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt-dir", default=CKPT_DIR)
     p.add_argument("--out", default=os.path.join(CKPT_DIR, "heaan2_model.txt"))
+    p.add_argument("--v5-dir", default="", help="지정하면 inference_v5 형식 모델 파일과 test CSV도 쓴다")
+    p.add_argument("--data-dir", default=os.path.join(os.path.dirname(CKPT_DIR), "hospital_data"))
     a = p.parse_args()
     export(a.ckpt_dir, a.out)
+    if a.v5_dir:
+        export_v5(a.out, a.v5_dir, a.data_dir)

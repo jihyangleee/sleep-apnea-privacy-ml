@@ -31,13 +31,13 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from dataset import (
-    SHHS_FEATURES, SHHS_LABEL, _SHHS_HR_COLS, DEFAULT_XML_DIR, _load_desat_features,
+    SHHS_FEATURES, SHHS_LABEL, _SHHS_HR_COLS, _load_oximetry_features,
 )
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hospital_data")
 
 ROLE_FEATURES = {
-    "A": ["avgsat", "avg_hr", "odi", "mean_desat_duration", "mean_desat_drop"],
+    "A": ["avgsat", "avg_hr", "odi_1min", "pct_lt90", "min_spo2", "desat_drop_1min", "desat_min_frac"],
     "B": ["slpprdp", "slpeffp", "times34p", "waso"],
     "C": ["age_s1", "gender", "bmi_s1", "neck20", "ess_s1"],
 }
@@ -51,7 +51,7 @@ def main(csv_path):
     df = df[df[SHHS_LABEL] >= 0]
     df = df[df["slpeffp"] > 0]
     df = df.dropna(subset=SHHS_FEATURES + [SHHS_LABEL])
-    df = df.set_index("nsrrid").join(_load_desat_features(DEFAULT_XML_DIR), how="inner")
+    df = df.set_index("nsrrid").join(_load_oximetry_features(), how="inner")
     df = df.sort_index()
 
     os.makedirs(OUT_DIR, exist_ok=True)
