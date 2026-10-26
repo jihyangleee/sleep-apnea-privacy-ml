@@ -39,7 +39,7 @@ import pandas as pd
 import jax.numpy as jnp
 import secretflow as sf
 from secretflow.device.device.spu import SPUCompilerNumReturnsPolicy
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from dataset import SHHS_LABEL, AHI_THRESHOLD
@@ -168,7 +168,7 @@ def _spu_accuracy(logit_shares, y):
 # ── 학습 루프 (세 병원 프로세스가 모두 같은 코드를 실행한다) ─────────────────
 
 def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigma, lr, eval_every,
-        seed=0, reveal_loss=False, data_dir=DATA_DIR, ckpt_dir=CKPT_DIR):
+        seed=0, reveal_loss=False, data_dir=DATA_DIR, ckpt_dir=CKPT_DIR, n_folds=None, fold=None):
     party_names = list(config["parties"])
     n_parties = len(party_names)
     roles = [config["parties"][p]["role"] for p in party_names]
@@ -193,8 +193,14 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
     n_rows = sf.reveal([pyus[i](_num_rows)(X_raw[i]) for i in range(n_parties)])
     assert len(set(n_rows)) == 1, f"병원별 행 개수가 다르다: {n_rows} (PSI 정렬 필요)"
     n = n_rows[0]
-    idx_train, idx_test = train_test_split(np.arange(n), test_size=0.2, random_state=42)
-    print(f"[data] n={n}, train={len(idx_train)}, test={len(idx_test)}", flush=True)
+    if n_folds:
+        # 교차검증: 공개 시드로 행 번호만 나눈다. 라벨을 쓰는 stratified 분할은 병원 B 외에는 할 수 없다.
+        splits = list(KFold(n_splits=n_folds, shuffle=True, random_state=42).split(np.arange(n)))
+        idx_train, idx_test = splits[fold]
+        print(f"[data] n={n}, fold {fold+1}/{n_folds}, train={len(idx_train)}, test={len(idx_test)}", flush=True)
+    else:
+        idx_train, idx_test = train_test_split(np.arange(n), test_size=0.2, random_state=42)
+        print(f"[data] n={n}, train={len(idx_train)}, test={len(idx_test)}", flush=True)
 
     # 표준화: 각 병원이 자기 학습 행만으로 평균·표준편차를 맞춘다 (test 행은 변환만)
     scaled = [pyus[i](_standardize, num_returns=2)(X_raw[i], names[i], idx_train) for i in range(n_parties)]
@@ -219,6 +225,8 @@ def run(self_party, config, n_epochs, batch_size, max_batches_per_epoch, dp_sigm
         for i in range(n_parties):
             info = {"party": party_names[i], "role": roles[i], "loss_type": LOSS_TYPE, "dp_sigma": dp_sigma,
                     "epochs": epoch, "epochs_planned": n_epochs, "seed": seed, "test_acc": test_acc}
+            if n_folds:
+                info.update({"n_folds": n_folds, "fold": fold})
             path = os.path.join(ckpt_dir, f"{party_names[i]}.npz")
             saved.append(pyus[i](_save_checkpoint)(states[i], meta[i], path, info))
         sf.wait(saved)
@@ -294,6 +302,8 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--reveal-loss", action="store_true",
                    help="디버깅용으로 배치 loss를 공개한다 (기본은 비공개)")
+    p.add_argument("--n-folds", type=int, default=None, help="교차검증 fold 수 (없으면 80/20 분할)")
+    p.add_argument("--fold", type=int, default=0, help="--n-folds를 줄 때 test로 쓸 fold 번호 (0부터)")
     a = p.parse_args()
     run(a.party, load_cluster_config(a.config), a.epochs, a.batch_size, a.max_batches, a.dp_sigma,
-        a.lr, a.eval_every, a.seed, a.reveal_loss, a.data_dir, a.ckpt_dir)
+        a.lr, a.eval_every, a.seed, a.reveal_loss, a.data_dir, a.ckpt_dir, a.n_folds, a.fold)
