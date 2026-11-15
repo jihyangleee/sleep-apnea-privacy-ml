@@ -139,7 +139,7 @@ python -m mpc.export_heaan2                               # → mpc/checkpoints/
 - 병원은 비밀키 없이 암호문×평문 곱셈, 회전, 덧셈만 한다.
 - 추론의 시그모이드는 근사가 아니라 **정확한 σ**다. 복호화 뒤 평문으로 계산하므로 비용이 없다. 학습 때의 근사 σ̂와 판정은 같다: z > 0 ⇔ σ > 0.5 ⇔ σ̂ > 0.5.
 - 모델 파일: `client_model.txt`(피처 이름, 스케일러, bias — 환자 기기용), `hospital{0,1,2}_model.txt`(병원별 인덱스·가중치). `mpc/export_heaan2.py`가 만든 `heaan2_model.txt`에서 나눠 만든다.
-- 임계값: 기본 0.5. `inference_v5`는 민감도 0.85를 목표로 0.4를 쓴다 (`v5_1_threshold_optimizer.py`).
+- 임계값: 기본 0.5. `inference_v5`는 민감도 0.85를 목표로 0.4를 쓴다.
 - 병원 서버와 환자 기기를 다른 머신에서 실행하는 버전은 `remote_inference/`에 있다 (같은 프로토콜, 호스트·포트 설정 가능).
 
 ---

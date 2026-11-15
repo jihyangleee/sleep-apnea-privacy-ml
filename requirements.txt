@@ -1,9 +1,8 @@
-torch>=2.0.0
-tenseal>=0.3.14
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-httpx>=0.27.0
+# 데이터 준비·피처 계산·실험 (Windows venv_win 또는 WSL)
 numpy>=1.26.0
 pandas>=2.2.0
 scikit-learn>=1.4.0
+requests>=2.31.0
+# SPU 학습 (mpc/train_spu_party.py) — WSL2 venv_wsl에서만. secretflow가 jax를 함께 설치한다
+# secretflow
 jax>=0.6.2

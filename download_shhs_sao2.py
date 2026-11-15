@@ -168,7 +168,8 @@ def process(f, token, session, refetch=False, extra_channels=False):
         return name, 0, "skip"
     tmp = os.path.join(TMP_DIR, name)
     url = f"{WEBSITE}/datasets/{DATASET}/files/a/{token}/m/{GEM_TAG}/{f['full_path']}"
-    for attempt in range(3):
+    attempt, conn_wait = 0, 60
+    while attempt < 3:
         try:
             with session.get(url, stream=True, timeout=120) as r:
                 r.raise_for_status()
@@ -187,9 +188,16 @@ def process(f, token, session, refetch=False, extra_channels=False):
                     extra[k], extra[f"{k}_fs"] = ch[k]["data"], ch[k]["fs"]
             np.savez_compressed(out, sao2=s["data"], fs=s["fs"], label=s["label"], phys_dim=s["phys_dim"], **extra)
             return name, size, f"ok fs={s['fs']:g}Hz n={len(s['data'])} +{','.join(k for k in ('hr', 'ox_stat') if k in ch) or 'none'}"
-        except Exception as e:  # 네트워크 끊김 등은 재시도
+        except requests.exceptions.ConnectionError as e:
+            # NSRR 서버가 몇 시간씩 접속을 받지 않을 때가 있다. 실패로 넘기지 않고 서버가 돌아올 때까지 기다린다.
             err = e
-            time.sleep(5 * (attempt + 1))
+            print(f"[wait] {name}: 서버 접속 불가 ({type(e).__name__}) → {conn_wait}s 후 재시도", flush=True)
+            time.sleep(conn_wait)
+            conn_wait = min(conn_wait * 2, 600)
+        except Exception as e:  # 크기 불일치·파싱 오류 등은 3번까지 재시도
+            err = e
+            attempt += 1
+            time.sleep(5 * attempt)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)

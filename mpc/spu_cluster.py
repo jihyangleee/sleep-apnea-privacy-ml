@@ -1,7 +1,6 @@
 """병원별 프로세스로 SecretFlow + SPU를 띄우는 프로덕션 모드 초기화.
 
-simulate_spu._make_spu()는 sf.init(parties=..., address="local")로 한 프로세스 안에서
-3개 병원을 흉내 낸다 (시뮬레이션 모드). 여기서는 병원마다 별도 프로세스를 띄우고,
+병원마다 별도 프로세스를 띄우고,
 각 프로세스가 자기 병원(self_party)으로만 동작한다.
 
 병원당 포트 2개 (cluster_local.json):
@@ -66,7 +65,7 @@ def init_party(self_party, config):
             }
             for name, p in parties.items()
         ],
-        # simulate_spu와 같은 설정 (testing.cluster_def의 3자 기본값: ABY3 + FM128)
+        # SecretFlow testing.cluster_def의 3자 기본값: ABY3 + FM128
         "runtime_config": {"protocol": "ABY3", "field": "FM128"},
     }
     # 다른 병원 프로세스가 늦게 떠도 SPU 링크 연결을 기다리도록 재시도를 넉넉히 준다.
